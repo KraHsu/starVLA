@@ -30,5 +30,9 @@ def get_world_model(config):
         from .Wan2 import _Wan2_Interface
 
         return _Wan2_Interface(config)
+    elif "vjepa2" in wm_name.lower():
+        from .vjepa2 import _VJEPA2_Interface
+
+        return _VJEPA2_Interface(config)
     else:
         raise NotImplementedError(f"World model {wm_name} not implemented")
