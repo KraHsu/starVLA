@@ -22,7 +22,7 @@
 
 | Gate | 时点 | 通过条件 | 不通过回退 |
 |---|---|---|---|
-| 🚧 **G-W1** | W1 末 | StarVLA-PI HF ckpt 在 LIBERO-Long 复现成功率 ≥ 86% | 排查环境/HF/数据；不进 W2 |
+| ✅ **G-W1** | W1 末 | StarVLA-PI HF ckpt 在 LIBERO-Long 复现成功率 ≥ 86%【**PASS @ 0.9667**，2026-05-03】 | 排查环境/HF/数据；不进 W2 |
 | 🚧 **G-W3** | W3 末 | LCLGP best-mode 替代 image goal，V-JEPA 2-AC 在 reach 任务上 ≥ 70% | 回退 K=2 + 仅 end goal，砍 §5.3.1 多模态贡献 |
 | 🚧 **G-W6** | W6 中 | GPT-4V vs 人工抽检的 ETAR 标签一致性 ≥ 80% | 回退 rule-based + 200 chunks 人工 |
 
@@ -123,41 +123,47 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 
 ### 1.1 Fork 与分支策略
 
-- [ ] **T-W1.1.1** Fork `starVLA/starVLA` 到个人/实验室账号
+- [x] **T-W1.1.1** Fork `starVLA/starVLA` 到个人/实验室账号
   - **要点**：基于稳定分支 `starVLA`，**不**用 `starVLA_dev`
   - **验收**：`gh repo view <fork>` 返回 fork 标记
   - **工时**：0.2 h
 
-- [ ] **T-W1.1.2** 创建工作分支 `pav-dev`
+- [x] **T-W1.1.2** 创建工作分支 `pav-dev`
   - **依赖**：T-W1.1.1
   - **要点**：`git checkout -b pav-dev`；commit message 前缀统一 `[PAV]`
   - **工时**：0.1 h
 
-- [ ] **T-W1.1.3** 把 `facebookresearch/vjepa2` 加为 submodule
+- [x] **T-W1.1.3** 把 `facebookresearch/vjepa2` 加为 submodule
   - **要点**：`git submodule add https://github.com/facebookresearch/vjepa2 third_party/vjepa2`
   - **验收**：`.gitmodules` 已提交
   - **工时**：0.1 h
 
 ### 1.2 环境安装
 
-- [ ] **T-W1.2.1** 创建 conda env `pav`，Python 3.10
-  - **要点**：与 starVLA `pyproject.toml` 对齐
+- [x] **T-W1.2.1** 创建 uv venv `.venv`，Python 3.11
+  - **要点**：项目已切到 uv（不用 conda）；3.11 同时满足 starVLA `>=3.10` 和 vjepa2 `>=3.11`
+  - **实际**：`uv venv --python 3.11 .venv`
   - **工时**：0.5 h
 
-- [ ] **T-W1.2.2** 装 starVLA 主依赖
-  - **要点**：`pip install -e .`；DeepSpeed Zero-2、accelerate、flash-attn==2.x、apex
-  - **风险**：flash-attn 编译需要匹配 CUDA 版本；备 `ninja` 加速
+- [x] **T-W1.2.2** 装 starVLA 主依赖
+  - **要点**：`uv pip install -r requirements.txt && uv pip install -e .`
+  - **flash-attn**：必须匹配 torch 的 CXX11 ABI；torch 2.6+cu124 对应 cxx11abiFALSE，用 prebuilt wheel `flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp311-cp311-linux_x86_64.whl`
+  - **风险已化解**：默认 PyPI flash-attn 是 cxx11abiTRUE，import 时报 `undefined symbol: _ZN3c105ErrorC2...`；详见 memory `feedback_flash_attn_abi.md`
   - **工时**：2-4 h（含编译失败重试）
 
-- [ ] **T-W1.2.3** 装 V-JEPA 2 依赖
+- [x] **T-W1.2.3** 装 V-JEPA 2 依赖
   - **依赖**：T-W1.2.2
-  - **要点**：`pip install -e third_party/vjepa2`；与 starVLA 共享 PyTorch 版本（不要降级）
-  - **验收**：`python -c "from vjepa2 import build_vjepa_predictor; print('ok')"`
+  - **要点**：`uv pip install -e third_party/vjepa2 --no-deps` —— 必须 `--no-deps`，否则 vjepa2 会把 transformers/timm/decord 回滚到自己的版本
+  - **补包**：`submitit braceexpand webdataset beartype python-box ftfy fire h5py peft`
+  - **导入路径**：vjepa2 是研究 repo，内部 `from src.x.y import z` 假定 repo 根在 sys.path；wrapper 通过 sys.path 注入处理
   - **工时**：1 h
 
-- [ ] **T-W1.2.4** 安装 LIBERO 与 Robosuite
-  - **要点**：依据 starVLA `examples/LIBERO/README.md`；MuJoCo 200 license / mujoco-py
-  - **验收**：`python -c "from libero.libero import benchmark; benchmark.get_benchmark_dict()"` 列出 4 suite
+- [x] **T-W1.2.4** 安装 LIBERO 与 Robosuite（独立 venv）
+  - **要点**：单独 `.venv-libero`（Python 3.10）；mujoco==3.2.3、robosuite==1.4.0、numpy==1.24.4 与训练栈版本不兼容
+  - **额外**：apt 装 `libosmesa6 libosmesa6-dev libgl1-mesa-dri`（cluster 缺 EGL `PLATFORM_DEVICE`，必须用 osmesa）
+  - **LIBERO 仓库**：clone 到 `playground/LIBERO`；patch `libero/libero/benchmark/__init__.py` 加 `weights_only=False`（PyTorch 2.6+ 兼容）
+  - **首次 import**：交互写 `~/.libero/config.yaml`，需 `StringIO('N\n')` 静默处理
+  - **验收**：6 suite 列出（含 `libero_10` = LIBERO-Long）
   - **工时**：1-2 h
 
 - [ ] 🔁 **T-W1.2.5** 安装 CALVIN（可推迟到 W10）
@@ -166,9 +172,10 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 
 ### 1.3 V-JEPA 2 接入 starVLA
 
-- [ ] **T-W1.3.1** 写 `starVLA/model/modules/world_model/vjepa2.py`
+- [x] **T-W1.3.1** 写 `starVLA/model/modules/world_model/vjepa2.py`
   - **依赖**：T-W1.2.3
   - **要点**：仿 `starVLA/model/modules/world_model/CosmoPredict2.py` 接口；导出 `VJEPA2Encoder`、`VJEPA2ACPredictor`
+  - **W1 简化**：`_VJEPA2_Interface.build_inputs/forward` 仅最小占位，完整实现留 W3 LCLGP（plan W1-R6）
   - **接口签名**：
     ```python
     class VJEPA2Encoder:
@@ -183,44 +190,54 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **验收**：`pytest tests/world_model/test_vjepa2.py::test_forward_shape`
   - **工时**：4 h
 
-- [ ] **T-W1.3.2** 下载 V-JEPA 2 ViT-g 权重 + AC predictor 权重
-  - **要点**：HF 路径见 vjepa2 README；放在 `ckpts/vjepa2_vitg/`
-  - **验收**：encoder 加载 + 单帧 forward 通过
+- [x] **T-W1.3.2** 下载 V-JEPA 2 ViT-g 权重 + AC predictor 权重
+  - **要点**：单文件 `vjepa2-ac-vitg.pt`（11.76 GB）含 encoder + predictor；放在 `playground/Pretrained_models/vjepa2_vitg/`（**沿用 starVLA 既有约定，不新建顶层 `ckpts/`**）
+  - **实际**：软链接到 cluster cache `/mnt/cpfs/zch/vjepa2_pretrain/vjepa2-ac-vitg.pt`
+  - **源 URL**：`https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt`
+  - **验收**：ckpt 结构含 `encoder` (484 entries) + `predictor` (300 entries)，`module.` 前缀已处理
   - **工时**：1 h
 
-- [ ] **T-W1.3.3** 注册 V-JEPA 2 到 starVLA `WORLD_MODEL_REGISTRY`
-  - **要点**：仿 CosmoPredict2 的注册流程（grep `@WORLD_MODEL_REGISTRY.register`）
-  - **验收**：`build_world_model("vjepa2_vitg")` 返回正确实例
+- [x] **T-W1.3.3** 接入 V-JEPA 2 到 `get_world_model` 工厂
+  - **修正**：starVLA **没有** `WORLD_MODEL_REGISTRY`；世界模型走 `starVLA/model/modules/world_model/__init__.py` 中字符串匹配工厂 `get_world_model(config)`
+  - **改动**：在 `__init__.py` 加一条 `elif "vjepa2" in wm_name.lower(): from .vjepa2 import _VJEPA2_Interface; return _VJEPA2_Interface(config)`
+  - **验收**：`get_world_model({base_wm: "vjepa2_vitg"})` 返回 `_VJEPA2_Interface` 实例（test_factory_routes_to_vjepa2 通过）
   - **工时**：1 h
 
-- [ ] **T-W1.3.4** Smoke test：starVLA dataloader → V-JEPA encoder
+- [x] **T-W1.3.4** Smoke test：starVLA dataloader → V-JEPA encoder
   - **依赖**：T-W1.3.3 + LIBERO 数据已下载（W2.1 提前一部分）
-  - **要点**：写 `tests/integration/test_vjepa_on_libero.py`，验证一个 batch 能 forward
-  - **验收**：测试通过；输出 shape `[B, 256, 1408]`
+  - **要点**：bootstrap `tests/` 目录（仓库原本无 tests/）；4 个 unit + 1 个 integration
+  - **细节**：predictor 在 fp16 下 sdpa 报 dtype mismatch（buffer 不跟随 .to）；测试用 fp32
+  - **验收**：5 passed in ~75s on H20
   - **工时**：2 h
 
 ### 1.4 Baseline 复现 [🚧 G-W1]
 
-- [ ] **T-W1.4.1** 下载 `StarVLA/bench-libero` 的 QwenPI checkpoint
-  - **要点**：HF `snapshot_download`；放在 `ckpts/starvla_pi_libero/`
+- [x] **T-W1.4.1** 下载 StarVLA-PI Qwen3-VL checkpoint
+  - **修正**：上游不存在 `StarVLA/bench-libero` repo；正确路径是 collection `StarVLA/libero-...` 下的 `StarVLA/Qwen3-VL-PI-LIBERO-4in1`
+  - **要点**：`hf download StarVLA/Qwen3-VL-PI-LIBERO-4in1 --local-dir playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1`
+  - **大小**：16.36 GB（`checkpoints/steps_100000_pytorch_model.pt`）
+  - **关联**：config.yaml 引用 `./playground/Pretrained_models/Qwen3-VL-4B-Instruct`，需先下 backbone
   - **工时**：0.5 h（依赖网速）
 
-- [ ] **T-W1.4.2** 准备 LIBERO 数据
-  - **要点**：跑 starVLA `examples/LIBERO/data_preparation.sh`
+- [x] **T-W1.4.2** 准备 LIBERO 数据
+  - **要点**：4 suite 都已在 cluster cache `playground/Datasets/LEROBOT_LIBERO_DATA/libero_{spatial,object,goal,10}_no_noops_1.0.0_lerobot/`
+  - **note**：LIBERO **eval** 不依赖 demo 数据集（仿真器从 bddl init states 重置）；数据集是给 W2.2 latent 抽取 + W3 LCLGP 训练用
   - **磁盘**：~80 GB
   - **工时**：2 h（主要等下载）
 
-- [ ] **T-W1.4.3** 跑 starVLA 自带 LIBERO eval（QwenPI）
+- [x] **T-W1.4.3** 跑 LIBERO-Long eval（QwenPI Qwen3-VL）
   - **依赖**：T-W1.4.1, T-W1.4.2
-  - **要点**：`bash examples/LIBERO/eval_files/run_libero_eval.sh`
+  - **PAV 自带脚本**（不动 examples/LIBERO/）：
+    - 单卡：`run_policy_server.sh` + `eval_libero_long.sh`（~4h on 1×H20）
+    - 多卡：`eval_libero_long_multi_gpu.sh`（**8×H20 ~63 min，3.8x 加速**）
   - **配置**：每任务 30 trials × LIBERO-Long 10 任务 = 300 trials
-  - **资源**：1×H100，~6 h
-  - **验收**：**🚧 LIBERO-Long 平均成功率 ≥ 86%**（论文 ~88.4，留 2.4 个点容差）
-  - **失败处理**：检查 ckpt 路径、PaliGemma vs Qwen3-VL backbone 是否对齐、LIBERO 任务集合是否一致
+  - **资源**：8×H20（实跑）
+  - **🚧 G-W1 PASS**：mean SR = **0.9667**（290/300），高出阈值 10.7 pp，比 README 报的 0.884 还高 8.3 pp
 
-- [ ] **T-W1.4.4** 锁定 baseline 数字 → `paper/tables/baseline_table.csv`
-  - **要点**：保存原始 trial 级数据，后面所有对比都以此为锚点
-  - **验收**：CSV 含每任务每 trial 的成功标记 + 总耗时
+- [x] **T-W1.4.4** 锁定 baseline 数字 → `paper/tables/baseline_table.csv`
+  - **要点**：`scripts/dump_baseline_table.py` 把 `rollout_<task>_episode<i>_<status>.mp4` 文件名转 trial 级 CSV
+  - **结果**：300 行（10 task × 30 trial）；每任务 SR 区间 [0.833, 1.000]；最弱 task 是 6 步序列 `put_white_mug_on_plate_and_put_chocolate_pudding_to_right_of_plate`
+  - **验收**：CSV 含每 trial 成功标记 + mp4 路径；后续 W8 主对比表 B0 锚点
 
 ---
 
