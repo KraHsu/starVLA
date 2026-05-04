@@ -4,11 +4,21 @@
 
 import os
 import sys
+import warnings
 from collections import namedtuple
 from typing import Optional
 
 import torch
 import torch.nn as nn
+
+# Vendored third_party/vjepa2 still calls the deprecated torch.backends.cuda.sdp_kernel()
+# context manager (no-arg form, equivalent to enabling every kernel — already the default).
+# Suppress at this single chokepoint; every V-JEPA 2 entry point in the project routes here.
+warnings.filterwarnings(
+    "ignore",
+    message=r"`torch\.backends\.cuda\.sdp_kernel\(\)` is deprecated.*",
+    category=FutureWarning,
+)
 
 _VJEPA2_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../../../third_party/vjepa2")
