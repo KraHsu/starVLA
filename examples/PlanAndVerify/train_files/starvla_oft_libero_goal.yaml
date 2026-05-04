@@ -1,0 +1,67 @@
+# Stage 1 baseline — StarVLA-OFT + Qwen3-VL-4B on LIBERO-Goal.
+# 8×H20, ZeRO-2, 20k steps. Used by run_oft_libero_goal.sh.
+# Differs from examples/LIBERO/train_files/starvla_cotrain_libero.yaml in:
+#   - framework.name baked to QwenOFT (no CLI override needed)
+#   - data_mix locked to libero_goal
+#   - max_train_steps 20000, save_interval 5000, logging_frequency 50
+#   - vlm_data section dropped (train_starvla.py does VLA SFT only,
+#     does not read cfg.datasets.vlm_data)
+
+run_id: stage1_oft_libero_goal      # overridden by shell with timestamp
+run_root_dir: playground/Checkpoints
+seed: 42
+wandb_entity: ""                    # filled in by shell from env
+wandb_project: starVLA_PAV_Stage1
+is_debug: false
+version_id: "0.21"
+
+framework:
+  name: QwenOFT
+  qwenvl:
+    base_vlm: ./playground/Pretrained_models/Qwen3-VL-4B-Instruct
+    attn_implementation: flash_attention_2
+    vl_hidden_dim: 2048             # vestigial; QwenOFT.py:121 overrides at runtime
+  action_model:
+    action_dim: 7
+    state_dim: 7
+    action_horizon: 8
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    data_root_dir: playground/Datasets/LEROBOT_LIBERO_DATA
+    data_mix: libero_goal           # 10 tasks, 主战场 per implementation_todo.md §1.2
+    action_type: delta_qpos
+    sequential_step_sampling: False
+    CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."
+    per_device_batch_size: 16
+    load_all_data_for_training: true
+    video_backend: torchvision_av
+
+trainer:
+  max_train_steps: 20000            # implementation_todo.md §1.2 upper bound
+  num_warmup_steps: 1000            # 5% of max_train_steps; was 5k in base for 100k steps
+  save_interval: 5000               # 5k/10k/15k/20k checkpoints
+  eval_interval: 100                # in-distribution MSE only (NOT sim eval — see plan §F)
+  learning_rate:
+    base: 2.5e-05
+    qwen_vl_interface: 1.0e-05
+    action_model: 1.0e-04
+  lr_scheduler_type: cosine_with_min_lr
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-06
+  freeze_modules: ""                # OFT baseline: full-parameter training
+  loss_scale:
+    vla: 1.0
+  max_grad_norm: 1.0
+  weight_decay: 0.0
+  logging_frequency: 50
+  gradient_clipping: 1.0
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+
+  optimizer:
+    name: AdamW
+    betas: [0.9, 0.95]
+    eps: 1.0e-08
+    weight_decay: 1.0e-08
