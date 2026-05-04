@@ -1,6 +1,6 @@
 # 毕设项目概览：starVLA × V-JEPA 时序融合
 
-> 这份文档不是 TODO，而是**项目章程**。它要回答的不是"要做哪些事"，而是"为什么这件事值得做、要回答什么问题、怎么算做完了、与已有工作的边界在哪里"。读完之后再去执行 `thesis-todo.md`，每一个 checkbox 才有意义。
+> 这份文档不是 TODO，而是**项目章程**。它要回答的不是"要做哪些事"，而是"为什么这件事值得做、要回答什么问题、怎么算做完了、与已有工作的边界在哪里"。读完之后再去执行 `implementation_todo.md`，每一个 checkbox 才有意义。
 
 ---
 
@@ -112,7 +112,7 @@ V-JEPA / V-JEPA2 / V-JEPA2.1 的训练目标本身就是在 latent space 预测�
 
 ### 5.2 V-JEPA 走 submodule 的理由
 
-V-JEPA2 官方仓库的 Python / 依赖栈与 starVLA 不完全一致（前者更激进地用 Python 3.12 + 新版 transformers，后者锁在 3.10 + 较稳版本）。把 V-JEPA 作为 submodule **隔离在 `external/vjepa2`、只用于离线特征抽取**，可以避免训练 env 被污染。
+V-JEPA2 官方仓库的 Python / 依赖栈与 starVLA 不完全一致（前者更激进地用 Python 3.12 + 新版 transformers，后者锁在 3.10 + 较稳版本）。把 V-JEPA 作为 submodule **隔离在 `third_party/vjepa2`、只用于离线特征抽取**，可以避免训练 env 被污染。
 
 这也是一个工程上的小亮点：**整个融合 pipeline 在训练时根本不需要 V-JEPA 的运行时依赖**，只需要它生成过的 `npz/parquet` 文件。
 
@@ -247,7 +247,7 @@ V-JEPA2 发布以来，社区主要把它用作**世界模型**做 planning（V-
 
 ## 12. 与 TODO 的关系
 
-读完这份文档，再去看 `thesis-todo.md`，应该出现下面这种对应关系：
+读完这份文档，再去看 `implementation_todo.md`，应该出现下面这种对应关系：
 
 - **TODO 阶段 0–3** 都是为了让 RQ1、RQ2、RQ3 能被"测得出来"。
 - **TODO 阶段 4** 直接回答 RQ1。
