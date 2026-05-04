@@ -314,6 +314,10 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
 > **W3 落地状态（commits）**：模型 + 损失 `dfd393f` ｜ trainer + DDP sampler + 诊断 `bf32a60` ｜ Bridge-v2 转换驱动 `d6dd74a` ｜ vjepa2 sdp_kernel warning fix `03d6664`.
 >
 > **v1 retrospective (2026-05-04)**：30 epoch 训练完成（user）+ 4/4 诊断已跑（user 数据机）→ **1/7 阈值通过**。失败集中在 σ saturation（log σ 顶到 cap=5.0）+ mode collapse (k=3 拿 76% 路由) + end head 未学习。详见 [docs/lclgp_diagnostics.md](docs/lclgp_diagnostics.md)。**Gate decision = 不直接跑 G-W3，先做 v2 retrain 修 σ saturation 单一根因（保持原设计）**，详见 §3.6。
+>
+> **v2 retrospective (2026-05-04)**：60 epoch retrain → **4/7 阈值通过**（σ-shortcut 完全切断，但 K=4 mode collapse 是独立新问题）→ 路径 B（v3：bal_T 退火 + repulsive loss）。**当前 W3 最优 ckpt = v2**（baseline_table.csv 锁在 v2）。
+>
+> **v3 retrospective (2026-05-04)**：60 epoch retrain → **2/7 阈值通过（回归）**。λ_rep=0.1 过强：D1-a pairwise cos 0.882→0.149（穿过目标区 [0.3, 0.7] 跌到近正交），D1-c Pearson(σ, err) 0.747→**−0.818** 符号翻转（σ-head 失校准），G1_end_sigma_cos 0.769→0.317（接近随机基线）。**baseline_table.csv 不升级**；下一步 = A（v4 = repulsive 退火 + 减弱）vs B（用 v2 当 plan-prior 进 Stage B），等用户决策。详见 [docs/lclgp_diagnostics.md §8](docs/lclgp_diagnostics.md)。
 
 ### 3.1 模型实现
 
@@ -444,7 +448,7 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
   - **决策**：4/7 → 路径 B（v3 retrain）→ T-W3.6.4
   - **不选**回退 K=2（4/7 在 4-5 区间，按用户决策树未触发硬回退）
 
-- [ ] **T-W3.6.4** v3 设计 + retrain（路径 B：bal_T 退火 + repulsive loss）
+- [x] **T-W3.6.4** v3 设计 + retrain（路径 B：bal_T 退火 + repulsive loss）
   - **配置**：`examples/PlanAndVerify/configs/lclgp_v3.yaml`（copy v2 + 改）
     - `bal_temperature: 1.0` → 新增 `bal_temperature_min: 0.1`（线性退火 over training steps）
     - 新增 `lambda_rep: 0.1`（待 smoke 调）
@@ -452,13 +456,22 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
   - **代码改动**（架构未动）：
     - `starVLA/model/framework/PlanVerify/lclgp.py` `__init__` 注册 `register_buffer("training_step", torch.zeros(()))`；forward 新增 `_mode_repulsive_loss(z_g)` 私有方法（pairwise cos² off-diag mean），按 step 计算当前 bal_T
     - `starVLA/training/train_starvla.py` 注入 global_step → module（1 行 `model.module.training_step.fill_(global_step)`）
-  - **smoke**：CPU forward+backward；l_rep finite > 0；bal_T 在 step=0/2400/4800 = 1.0/0.55/0.10
-  - **retrain**：H200 数据机，60 epoch（~0.6h），同 v2 protocol
-  - **重诊**：4 cmd 同 v2，覆盖 paper/tables/lclgp_*.csv 到 v3
-  - **决策树（与 T-W3.6.3 同口径）**：
-    - ≥ 6/7 → Stage B（G-W3 driver）
-    - 4-5/7 → K=2 派生（n_modes=4→2 + v3 同 hparam）；K=2 失败 → PaV-Lite
-    - ≤ 3/7 → 直接 K=2 / PaV-Lite
+  - **smoke**：CPU forward+backward；l_rep finite > 0；bal_T 在 step=0/2400/4800 = 1.0/0.55/0.10 ✅
+  - **retrain**：H20 数据机，60 epoch（~0.6h），同 v2 protocol ✅
+  - **重诊**：4 cmd 同 v2，覆盖 paper/tables/lclgp_*.csv 到 v3 ✅
+  - **诊断结果（2026-05-04 完成）**：**2/7 通过**（#1 G1_end_min_cos ✅、#6 D2-a cf L1 ✅）
+    - 通过：G1_end_min_cos 0.799→**0.862**（继续改善）
+    - 灾难性回归：D1-c Pearson(σ, err) 0.747→**−0.818**（符号翻转），G1_end_sigma_cos 0.769→**0.317**（接近随机基线 1/K=0.25）
+    - 过冲：D1-a pairwise cos 0.882→**0.149**（穿过目标区 [0.3, 0.7] 跌到近正交）
+    - 残留 mode collapse：cov_end k1=99.9%（v2 是 k2=99.6%；只是 winner 旋转）
+  - **机制判读**：repulsive loss 强度过大（λ_rep=0.1）+ 与 σ-head 共享 backbone → z_g 层被强力推开，σ-head 拿到反向重塑的 representation → σ 失校准（D1-c 符号翻转）；bal-T 锐化与 repulsive 拉开的组合产生"4 mode 输出位置远 + 1 mode 独占 routing"的最坏交互
+  - **决策（按 T-W3.6.3 决策树）**：2/7 ≤ 3 → 重审是否结构问题；当前 W3 最好仍是 v2（4/7），baseline_table.csv **不升级**
+  - **详见**：[docs/lclgp_diagnostics.md §8](docs/lclgp_diagnostics.md)
+
+- [ ] **T-W3.6.5** v4 / Stage B 决策（**等用户在 A/B 间二选一**）
+  - **A. v4 = repulsive 退火 + 减弱**：`λ_rep` schedule（前 1200 step 关闭、随后线性增至 `λ_rep_max=0.03`，v3 的 3 折），`bal_temperature_min: 0.3` 不打到 0.1；只动 yaml + 1 处 forward；不动架构 / α
+  - **B. 用 v2 ckpt 当 plan-prior 进 Stage B**：driver 训练只用 plan-prior 输出做 condition，单 mode 也能进；W3 mode-balance 退化为 ablation 议题
+  - **C（保底）**：K=2 简化 → PaV-Lite，仅在 A/B 都失败后启用
 
 ---
 

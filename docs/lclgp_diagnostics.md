@@ -408,7 +408,83 @@ v3 代码改动：`starVLA/model/framework/PlanVerify/lclgp.py` forward 加 repu
 
 - v1 训练完成、v1 诊断完成 → ✅
 - v2 配置 + 代码改动准备完成 → ✅
-- v2 retrain（60 epoch / 0.6h on H200）→ ✅
+- v2 retrain（60 epoch / 0.6h on H20）→ ✅
 - v2 诊断（4/7 通过）→ ✅
-- v3 设计 + retrain → ⏳ 下一 commit
-- Stage B (G-W3 driver) → ⏳ 取决于 v3 诊断结果（≥ 6/7 触发）
+- v3 设计 + commit → ✅（commit 664ef46 + f5ed3ae）
+- v3 retrain + 诊断 → ✅（详见 §8）
+- Stage B (G-W3 driver) → ⏳ 取决于 v3 诊断结果
+
+---
+
+## 8. v3 retrospective + 路径 B 回归判定
+
+**Date**: 2026-05-04
+**Run**: `pav_w3_lclgp_v3` (ckpt `playground/Checkpoints/pav_w3_lclgp_v3/final_model/pytorch_model.pt`)
+**Config**: [examples/PlanAndVerify/configs/lclgp_v3.yaml](../examples/PlanAndVerify/configs/lclgp_v3.yaml)
+**墙钟**: 60 epoch / ~0.6h on H20
+**v3 仅在 v2 之上叠加两项**（架构未动；α 0.5 不动）：
+- bal_temperature 退火 1.0 → 0.1 over 4800 step（线性）
+- repulsive loss 在 z_g（pairwise cos² off-diag mean，λ_rep=0.1）
+
+### 8.1 v1↔v2↔v3 7 阈值对比
+
+| # | Metric | Threshold | v1 | v2 | v3 | v3 Pass | Δ(v3−v2) 解读 |
+|---|---|---|---|---|---|---|---|
+| 1 | G1_end_min_cos_mean | ≥ 0.75 | 0.213 | 0.799 | **0.862** | ✅ | ↑ repulsive 帮检索任务更干净 |
+| 2 | G1_end_sigma_cos_mean | ≥ 0.70 | 0.202 | 0.769 | **0.317** | ❌ | ↓↓ σ-head 被打坏（σ 不再指向 best mode）|
+| 3 | D1-a pairwise cos ∈ [0.30, 0.70] | range | 0.957 | 0.882 | **0.149** | ❌ | 穿过目标区跌到近正交，repulsive 过冲 |
+| 4a | D1-b min mode freq end | ≥ 0.10 | 0.013 | 0.0 | 0.0 | ❌ | 仍 mode collapse（slot 旋转，未真正 4-way）|
+| 4b | D1-b min mode freq delta | ≥ 0.10 | 0.0 | 0.0 | 0.0 | ❌ | 同上 |
+| 5 | D1-c Pearson(σ, err) | ≥ 0.40 | nan | 0.747 | **−0.818** | ❌ | **符号翻转**：σ 现在反预测 error |
+| 6 | D2-a cf L1 | ≥ 0.05 | 0.740 | 0.319 | 0.162 | ✅ | 仍健康（继续下降但 > 0.05）|
+| 7a | D3-a end specialization gap | ≥ 0.05 | 0.021 | 0.018 | 0.019 | ❌ | 基本未动 |
+| 7b | D3-a delta specialization gap | ≥ 0.05 | 0.004 | 0.009 | 0.008 | ❌ | 基本未动 |
+
+**通过 2/7（v2: 4/7）→ 路径 B 回归。**
+
+### 8.2 关键诊断 — repulsive 过冲 + σ-head 反相
+
+v3 三处独立证据指向同一机制（repulsive loss 强度过大且与 σ-head 共享 backbone，反向打坏 σ 的校准）：
+
+1. **D1-a 0.882 → 0.149**：pairwise cos 不仅未停在目标区 [0.3, 0.7]，而是穿过整个区间跌到 0.15（4 slot 输出近似正交）。`λ_rep=0.1` 显著过强，让 mode 输出远离"温和差异"区。
+2. **D1-c Pearson 符号翻转 +0.747 → −0.818**：v2 σ 与 reconstruction error 正相关（σ-head 正确校准）；v3 强负相关意味着 σ 现在**反向**指示 error。机制：repulsive 在 z_g 层把不同 mode 推开，σ-head 共享上游 backbone 拿到了被反向重塑的 representation，预测的不确定度与实际误差脱钩。
+3. **G1_end_sigma_cos_mean 0.769 → 0.317**：与 #5 同源——基于 σ 选 best mode 的成功率从 77% 跌至 32%（接近 1/K=25% 随机基线）。
+
+**残留 mode collapse 分析**：
+- cov_end k=[0.001, **0.999**, 0, 0]（v2 是 k2=0.996，v3 旋转到 k1=0.999），同样 winner-takes-all
+- bal_temperature 退火 1.0→0.1 没拉开 routing：4 个 slot 输出在 z_g 层被 repulsive 拉到正交后，softmin(L1) 仍能锁定单一 winner（哪个 mode 离 GT 最近就独占），锐化温度反而强化 winner-takes-all
+- 即：**bal-T 锐化** + **repulsive 拉开** 的组合在当前 λ_rep 强度下产生了"4 mode 输出位置远 + 1 mode 独占 routing"的最坏交互
+
+### 8.3 v3 改动 vs v2 baseline 收益清算
+
+| 指标 | v2 → v3 | 性质 |
+|---|---|---|
+| G1_end_min_cos_mean | 0.799 → 0.862 | 单点改善（+0.06）|
+| D1-a pairwise cos | 0.882 → 0.149 | 过冲（差距：目标区 [0.3, 0.7]）|
+| Pearson(σ, err) | +0.747 → **−0.818** | 灾难性反转（损失 σ-head 全部校准）|
+| G1_end_sigma_cos | 0.769 → 0.317 | 灾难（接近随机基线）|
+| 7 阈值通过数 | 4/7 → 2/7 | 净减 2 |
+
+**v2 优于 v3**。Gate 决策不能升级覆盖 v2 baseline。
+
+### 8.4 决策路径 — 2/7 → 不进 Stage B；下一步候选
+
+按 §3.6 决策树：≤ 3/7 → 重审是否结构性问题。**当前不能直接走 Stage B**。
+
+候选下一步（按建议优先级）：
+
+| 选项 | 描述 | 风险 / 收益 |
+|---|---|---|
+| **A. v4 = repulsive 退火 + 减弱** | `λ_rep` schedule：前 1200 step 关闭、随后线性增至 `λ_rep_max=0.03`（v3 `λ_rep=0.1` 的 3 折），bal_temperature 终值改 0.3 不打到 0.1 | 中风险：3 旋钮再调一次；高收益若过冲是唯一问题 |
+| **B. 用 v2 当 plan-prior 进 Stage B** | mode collapse 主要伤 "多 mode 探索"；driver 训练只用 plan-prior 输出做 condition，单 mode 也能进 | 低风险：v2 4/7 已知；W3 mode-balance 退化为 ablation 议题 |
+| **C. K=2 或 PaV-Lite 回退** | 简化结构 / 减少自由度 | 高代价：架构改动；仅在 A/B 都失败后启用 |
+
+**8.4 节决策**：等用户在 A/B 之间二选一；C 暂不触发。
+
+### 8.5 截至本报告时间点 (2026-05-04 晚段)
+
+- v3 retrain（60 epoch / ~0.6h on H20）→ ✅
+- v3 诊断（2/7，回归）→ ✅
+- v3 baseline_table.csv 升级 → ❌（v2 仍是 W3 当前最好；baseline_table 不变）
+- Stage B (G-W3 driver) → ⏳ 等 A/B 决策
+- v4 设计 → ⏳ 仅在用户选 A 时启动
