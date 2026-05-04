@@ -19,6 +19,7 @@ import json
 import os
 import re
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -92,6 +93,29 @@ def strip_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]
     return cleaned
 
 
+def patch_vjepa2_1_rope_dtype() -> None:
+    """Keep RoPE-rotated q/k in the same dtype as qkv outputs.
+
+    V-JEPA 2.1 builds RoPE positions as float32 tensors. In a bf16/fp16 model,
+    the original helper promotes rotated q/k to float32 while v remains the
+    model dtype, which makes PyTorch SDPA reject q/k/v. Patch only the runtime
+    helper, leaving third_party source untouched.
+    """
+    from app.vjepa_2_1.models.utils import modules as vjepa_modules
+
+    if getattr(vjepa_modules.rotate_queries_or_keys, "_starvla_dtype_safe", False):
+        return
+
+    original_rotate = vjepa_modules.rotate_queries_or_keys
+
+    def dtype_safe_rotate_queries_or_keys(x, pos, n_registers, has_cls_first):
+        return original_rotate(x, pos, n_registers, has_cls_first).to(dtype=x.dtype)
+
+    dtype_safe_rotate_queries_or_keys._starvla_dtype_safe = True
+    dtype_safe_rotate_queries_or_keys._starvla_original = original_rotate
+    vjepa_modules.rotate_queries_or_keys = dtype_safe_rotate_queries_or_keys
+
+
 def load_vjepa_encoder(
     ckpt_path: str | os.PathLike[str],
     num_frames: int,
@@ -99,6 +123,7 @@ def load_vjepa_encoder(
     device: torch.device,
     dtype: torch.dtype,
 ):
+    patch_vjepa2_1_rope_dtype()
     from app.vjepa_2_1.models import vision_transformer as vit
 
     encoder = vit.vit_base(
@@ -136,6 +161,13 @@ def load_vjepa_encoder(
     for param in encoder.parameters():
         param.requires_grad_(False)
     return encoder
+
+
+def encoder_forward(encoder, batch: torch.Tensor, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    use_autocast = device.type == "cuda" and dtype in {torch.bfloat16, torch.float16}
+    ctx = torch.autocast(device_type="cuda", dtype=dtype) if use_autocast else nullcontext()
+    with ctx:
+        return encoder(batch)
 
 
 def build_single_dataset(config_yaml: str, dataset_mix: str, camera_key: str, num_history_frames: int):
@@ -349,7 +381,7 @@ def extract_episode(
         batch = batch.to(device=device, dtype=encoder_dtype, non_blocking=(device.type == "cuda"))
 
         with torch.inference_mode():
-            tokens = encoder(batch)
+            tokens = encoder_forward(encoder, batch, device, encoder_dtype)
         tokens = tokens.float().cpu()
 
         pooled_chunks.append(tokens.mean(dim=1))

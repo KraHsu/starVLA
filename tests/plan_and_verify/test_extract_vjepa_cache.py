@@ -1,10 +1,12 @@
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from examples.PlanAndVerify.cache_files.extract_vjepa_cache import (
     build_index,
     iter_sharded_episodes,
+    patch_vjepa2_1_rope_dtype,
     save_episode_cache,
 )
 
@@ -50,3 +52,15 @@ def test_iter_sharded_episodes_splits_by_episode_index():
     assert shard0 == [(10, 3), (12, 5), (14, 7)]
     assert shard1 == [(11, 4), (13, 6)]
     assert iter_sharded_episodes(trajectory_ids, trajectory_lengths, 2, 0, max_episodes=2) == [(10, 3), (12, 5)]
+
+
+def test_vjepa_rope_patch_preserves_input_dtype():
+    patch_vjepa2_1_rope_dtype()
+    from app.vjepa_2_1.models.utils import modules as vjepa_modules
+
+    x = torch.randn(1, 2, 4, 12, dtype=torch.bfloat16)
+    pos = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+
+    out = vjepa_modules.rotate_queries_or_keys(x, pos=pos, n_registers=0, has_cls_first=False)
+
+    assert out.dtype == torch.bfloat16
