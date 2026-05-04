@@ -112,9 +112,9 @@ V-JEPA / V-JEPA2 / V-JEPA2.1 的训练目标本身就是在 latent space 预测�
 
 ### 5.2 V-JEPA 走 submodule 的理由
 
-V-JEPA2 官方仓库的 Python / 依赖栈与 starVLA 不完全一致（前者更激进地用 Python 3.12 + 新版 transformers，后者锁在 3.10 + 较稳版本）。把 V-JEPA 作为 submodule **隔离在 `third_party/vjepa2`、只用于离线特征抽取**，可以避免训练 env 被污染。
+V-JEPA2 是 facebookresearch 的研究 repo（路径风格 `from src.x.y import ...`、内部脚本不打包，`pip install` 没有意义），用 submodule 引入到 `third_party/vjepa2` 是版本可锁、可读源、改动可追踪的稳定路线。它的依赖栈也与 starVLA 不完全一致（自带 transformers / timm / decord 的旧版 pin），需要 `uv pip install -e third_party/vjepa2 --no-deps` 装到主 venv `.venv`（py3.11，与 starVLA 共栈），才不会把训练栈的版本回滚掉。
 
-这也是一个工程上的小亮点：**整个融合 pipeline 在训练时根本不需要 V-JEPA 的运行时依赖**，只需要它生成过的 `npz/parquet` 文件。
+更重要的工程意图是把 V-JEPA forward **完全踢出训练循环**：阶段 2 抽取一次特征落到 `npz/parquet`，阶段 3 起训练只读缓存。这意味着**进入主实验阶段后，训练 env 不再需要 V-JEPA 运行时依赖**——对算力受限的研究者有直接价值（4090 训练机不必再装 V-JEPA 2）。
 
 ### 5.3 整体数据流
 
