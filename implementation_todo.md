@@ -1054,7 +1054,7 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
 | R2 | V-JEPA 表征不敏感 | 成功 demo Spearman > -0.3 | 加 SigLIP cross-check verifier | W4 |
 | R3 | learned ETAR 规则标签质量不足 | 人工抽检宏平均准确率 < 80% 或类别明显塌缩 | 跳过 learned ETAR；主线继续 rule ETAR | W6 |
 | R4 | RESAMPLE 误触率高 | 成功 traj 上 > 10% | 调 ETAR 阈值，加 EMA | W7 |
-| R5 | π₀ 在 LIBERO-Long 已饱和 | B0 > 90% | 重心移到 Perturb（未饱和） | W8 |
+| R5 | π₀ 在 LIBERO-Long 已饱和 | B0 > 90%（实测 96.7%，仅留 ≤ 3.3 pp 增益空间） | (a) 写作：主表 caption 标注饱和区，PaV 主增益声明转向 §9.3 Perturb 表；正文 4.X 节用 LIBERO-Long 做"不破坏"sanity check，不做主增益依据；(b) 实验：W9 Perturb（P1-P5）作为主战场；(c) 数字：M1/M2/M3 在 LIBERO-Long 上若 ΔSR < 1pp 视为"不退化通过"，paired bootstrap p 值不强制 < 0.01 | W8 / 论文写作 |
 | R6 | CALVIN 集成超时 | W10 中段未跑通 | 砍 CALVIN，主结果靠 LIBERO + Perturb | W10 |
 | R7 | openpi 补充表 RTT 太大 | HTTP > 50 ms RTT | 改 unix socket 或砍此表 | W10 |
 | R8 | starVLA 上游 breaking change | rebase 冲突 > 1d | 锁 commit hash，不 rebase | 全程 |
