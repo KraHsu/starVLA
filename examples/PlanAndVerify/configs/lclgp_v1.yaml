@@ -38,3 +38,33 @@ data:
     n_tasks: 32
     n_demos: 8              # batch_size = n_tasks * n_demos = 256
     seed: 0
+
+# ---------------------------------------------------------------------------
+# Framework — W3.1 deliverable. See research_design_plan_and_verify.md §5.2.
+# ---------------------------------------------------------------------------
+framework:
+  name: LCLGP
+  lclgp:
+    # Architecture (d_text/d_latent must match data.* above).
+    d_text: 2560
+    d_latent: 1408
+    d_hidden: 1024
+    n_heads: 16
+    n_layers: 4
+    n_modes: 4              # K — multimodal candidate goals
+    n_tokens: 256
+    z_dropout: 0.1          # D2 regularizer: zero z_t with this probability
+    attn_dropout: 0.1
+    mlp_ratio: 4.0
+
+    loss:
+      alpha: 0.5            # end vs delta timescale weight (eq.5.3.4)
+      beta: 0.1             # heteroscedastic log_sigma regularization
+      lambda_bal: 0.05      # mode-balance KL weight
+      lambda_ctr: 0.1       # InfoNCE weight
+      lambda_cf: 0.05       # counterfactual hinge weight
+      tau: 0.07             # InfoNCE temperature
+      cf_margin: 0.05       # counterfactual hinge margin
+      log_sigma_min: -5.0
+      log_sigma_max: 5.0
+      bal_temperature: 1.0  # softmin temp for differentiable mode KL
