@@ -68,3 +68,47 @@ framework:
       log_sigma_min: -5.0
       log_sigma_max: 5.0
       bal_temperature: 1.0  # softmin temp for differentiable mode KL
+
+# ---------------------------------------------------------------------------
+# Trainer — W3.3 deliverable. See research_design_plan_and_verify.md §5.5.
+# ---------------------------------------------------------------------------
+trainer:
+  # Loop control. ~20K samples, batch 256, ~80 steps/epoch → 30 epochs ≈ 2400 steps.
+  max_train_steps: 2400
+  num_warmup_steps: 200
+  logging_frequency: 20
+  save_interval: 400
+  num_workers: 4
+
+  # Optimizer (AdamW); LR ramps base=5e-4 → 1e-5 cosine over the run.
+  learning_rate:
+    base: 5.0e-4
+  lr_scheduler_type: cosine
+  scheduler_specific_kwargs: {}
+  optimizer:
+    betas: [0.9, 0.999]
+    weight_decay: 0.05
+    eps: 1.0e-8
+  gradient_clipping: 1.0
+
+  # Loss tag scaling (unused by LCLGP but kept for trainer-utils compat).
+  loss_scale:
+    vla: 1.0
+
+  # Checkpoint + freeze + resume controls.
+  save_format: pt           # "pt" or "safetensors"
+  freeze_modules: ""        # LCLGP is fully trainable
+  pretrained_checkpoint: null
+  reload_modules: null
+  is_resume: false
+
+# ---------------------------------------------------------------------------
+# Top-level run identifiers (overridable by --run_id / --run_root_dir).
+# ---------------------------------------------------------------------------
+seed: 0
+is_debug: false
+run_root_dir: ./playground/Checkpoints
+run_id: pav_w3_lclgp_v1
+output_dir: null            # filled by setup_directories(): ${run_root_dir}/${run_id}
+wandb_project: pav-w3-lclgp
+wandb_entity: null          # set per-user (or via --wandb_entity)
