@@ -36,6 +36,7 @@ from evals.video_classification_frozen.utils import make_transforms
 
 from starVLA.dataloader.lerobot_datasets import make_LeRobotSingleDataset
 from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
+from starVLA.dataloader.gr00t_lerobot.video import get_frames_by_timestamps
 
 
 MODEL_NAME = "vjepa2_1_vit_base_384"
@@ -364,6 +365,83 @@ def preprocess_clip(transform, clip: np.ndarray) -> torch.Tensor:
     return transformed[0]
 
 
+def _decode_image_entry(dataset, entry) -> np.ndarray:
+    from PIL import Image
+    import io
+
+    if isinstance(entry, np.ndarray):
+        return entry
+    if isinstance(entry, Image.Image):
+        return np.array(entry)
+    if isinstance(entry, dict):
+        img_bytes = entry.get("bytes", None)
+        img_path = entry.get("path", None)
+
+        if img_bytes is not None:
+            return np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+
+        if img_path is not None:
+            path_obj = Path(img_path)
+            if not path_obj.is_absolute():
+                path_obj = dataset.dataset_path / path_obj
+            return np.array(Image.open(path_obj).convert("RGB"))
+
+    raise TypeError(f"Unsupported image entry type: {type(entry)}")
+
+
+def load_raw_video_clips(
+    dataset,
+    trajectory_id: int,
+    base_indices: list[int],
+    camera_key: str,
+) -> list[np.ndarray]:
+    """Load all raw clips for a batch with a single video reader open.
+
+    This avoids calling dataset.get_video(...) once per base index, which would
+    repeatedly open/seek the decoder and can exhaust host memory with the
+    torchvision/PyAV backend under 8-way parallel extraction.
+    """
+    video_delta = dataset.delta_indices[camera_key]
+    trajectory_index = dataset.get_trajectory_index(trajectory_id)
+    max_length = int(dataset.trajectory_lengths[trajectory_index])
+    step_indices = np.asarray(base_indices, dtype=np.int64)[:, None] + video_delta[None, :]
+    step_indices = np.clip(step_indices, 0, max_length - 1)
+
+    key = camera_key.replace("video.", "")
+    original_key = dataset.lerobot_modality_meta.video[key].original_key
+    if original_key is None:
+        original_key = key
+
+    if dataset.curr_traj_data is not None and original_key in dataset.curr_traj_data.columns:
+        image_entries = dataset.curr_traj_data[original_key].tolist()
+        clips = []
+        for clip_indices in step_indices:
+            frames = [_decode_image_entry(dataset, image_entries[int(idx)]) for idx in clip_indices]
+            clips.append(np.stack(frames, axis=0))
+        return clips
+
+    video_path = dataset.get_video_path(trajectory_id, key)
+    assert dataset.curr_traj_data is not None, f"No data found for {trajectory_id=}"
+    assert "timestamp" in dataset.curr_traj_data.columns, f"No timestamp found in {trajectory_id=}"
+
+    timestamps = dataset.curr_traj_data["timestamp"].to_numpy()
+    flat_timestamps = timestamps[step_indices.reshape(-1)]
+    if dataset._lerobot_version == "v3.0":
+        episode_meta = dataset.trajectory_ids_to_metadata.get(trajectory_id, {})
+        from_timestamps = episode_meta.get("videos/from_timestamps", {})
+        if original_key in from_timestamps:
+            flat_timestamps = flat_timestamps + float(from_timestamps[original_key])
+
+    frames = get_frames_by_timestamps(
+        video_path.as_posix(),
+        flat_timestamps,
+        video_backend=dataset.video_backend,
+        video_backend_kwargs=dataset.video_backend_kwargs,
+    )
+    frames = frames.reshape(len(base_indices), len(video_delta), *frames.shape[1:])
+    return [frames[i] for i in range(frames.shape[0])]
+
+
 def prepare_batch_clips(
     dataset,
     trajectory_id: int,
@@ -372,15 +450,16 @@ def prepare_batch_clips(
     transform,
     num_workers: int,
 ) -> torch.Tensor:
-    def _load_one(base_index: int) -> torch.Tensor:
-        clip = dataset.get_video(trajectory_id, camera_key, base_index)
+    raw_clips = load_raw_video_clips(dataset, trajectory_id, base_indices, camera_key)
+
+    def _load_one(clip: np.ndarray) -> torch.Tensor:
         return preprocess_clip(transform, clip)
 
     if num_workers <= 1 or len(base_indices) <= 1:
-        clips = [_load_one(base_index) for base_index in base_indices]
+        clips = [_load_one(clip) for clip in raw_clips]
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-            clips = list(executor.map(_load_one, base_indices))
+            clips = list(executor.map(_load_one, raw_clips))
     return torch.stack(clips, dim=0)
 
 
