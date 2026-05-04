@@ -581,4 +581,106 @@ v3/v4 探索（path B）的成果是结构性诊断（§9.4），不是 W3 阈�
 - v4 诊断（2/7，与 v3 持平、未击穿 v2 4/7）→ ✅
 - v4 baseline_table.csv 升级 → ❌
 - v4 关键发现：soft routing / hard argmin 语义错位 → 结构性问题（§9.4）
-- 下一步：等用户在 A2 / B / C 间决策（**建议 B**）
+- 用户决策：**C1+C2+C3 = 全 MoE 化重构（v5）**
+
+---
+
+## 10. v5 设计 — 显式 MoE 路由（C1+C2+C3）
+
+**Date**: 2026-05-04
+**Config**: [examples/PlanAndVerify/configs/lclgp_v5.yaml](../examples/PlanAndVerify/configs/lclgp_v5.yaml)
+**Code**: [starVLA/model/framework/PlanVerify/lclgp.py](../starVLA/model/framework/PlanVerify/lclgp.py) — `RoutingModule` class + `_forward_v5` 方法 + `predict_goal` 分支
+**实施动机**：v2/v3/v4 在 path B（hparam 调缓）已撞结构上限。§9.4 三根因（L_bal softmin 弱、L_ctr best-mode 滚雪球、hindsight argmin 评估）互相耦合，需架构改动。
+
+### 10.1 v5 = C1+C2+C3 全套 MoE 化
+
+| 子改动 | 解的根因（§9.4）| v5 实现 |
+|---|---|---|
+| **C1** L_bal hard routing | softmin 给 4 微小变体 ~均匀概率 → KL=0 假性达标 | Gumbel-softmax `hard=True` 得 one-hot pi（前向硬，反向 STE）|
+| **C2** L_ctr/L_recon routing-weighted | best-mode 滚雪球 → 1 winner 独占 InfoNCE/Recon 梯度 | `Σ_k π[b,k] · per_mode_loss[b,k]`（pi_hard one-hot ⇒ 拨给路由模式 + STE 软梯度回 router）|
+| **C3** Explicit RoutingModule | hindsight argmin 评估 vs 训练时无 GT routing 错位 | 新 `RoutingModule(text, z_t) → π_end, π_delta`，无 GT，推理可用；与训练 / 评估三处统一 |
+
+### 10.2 RoutingModule 结构（user 选 two-router shared backbone）
+
+```python
+class RoutingModule(nn.Module):
+    def __init__(self, d_text, d_latent, d_hidden, K):
+        # 共享 backbone
+        self.text_proj = nn.Linear(d_text, d_hidden)
+        self.zt_proj   = nn.Linear(d_latent, d_hidden)
+        self.shared    = nn.Sequential(nn.Linear(d_hidden, d_hidden), nn.GELU())
+        # 分头 K-way
+        self.head_end   = nn.Linear(d_hidden, K)
+        self.head_delta = nn.Linear(d_hidden, K)
+```
+
+end-router 和 delta-router 可独立路由（user 决策点）。理由：v2-v4 实测 G1_end_min_cos ≈ 0.79 vs G1_delta_min_cos ≈ 0.99，end 头显著难于 delta 头；强制共享路由会瓶颈 end 头的特化能力。两 head 共享 (text, z_t) backbone，参数代价 ~50。
+
+### 10.3 路由语义（三处统一）
+
+- **训练（warmup）**：前 `router_warmup_steps=500` step，`pi_hard[b, k] = 1 if k == b % K else 0`（确定性均匀）。所有 K mode 头都拿到 recon 梯度 → 防止 winner-take-all snowball at L_recon level（Plan agent fix B）。
+- **训练（warmup 后）**：`pi_hard = F.gumbel_softmax(logits, tau=current_T, hard=True)`。Gumbel temperature 线性退火 5.0 → 0.5 over 4800 step（比 v3 的 1.0 → 0.1 温和）。
+- **推理（`predict_goal`）**：`pi_hard = F.one_hot(logits.argmax(-1), K)`。**确定性 argmax，无 Gumbel 采样**（Plan agent fix F2）。
+
+### 10.4 5 损失重写
+
+| 损失 | v1-v4 | v5 |
+|---|---|---|
+| **L_recon_end** | `min_k(L1_k/σ_k + β·logσ_k)`（min-of-K，只 winner 拿梯度）| `Σ_k π_end[b,k] · (L1_k/σ_k + β·logσ_k)`（routing-weighted；one-hot ⇒ 选中 mode 拿梯度 + STE 软梯度回 router）|
+| **L_recon_delta** | 同上 min-of-K | 用 `π_delta` |
+| **L_bal** | softmin shim → KL | 直接 `KL(pi_hard.mean(0) \|\| Uniform)`，end/delta 各一项 |
+| **L_ctr** | positive = `z_g_end[argmin_end]`（hindsight）| positive = `z_g_end[π_end.argmax]`（router）；DDP `gather_fn` 不变 |
+| **L_cf** | hinge on argmin best | `chosen_end` 来自 main pass（Plan agent fix F1）；CF 不重新路由 — 测"同一个 plan 下，移除 z_t 是否影响输出" |
+| **L_repulsive** | cos² off-diag on z_g | 不变（仍要 K mode 输出在 latent 空间可区分）|
+
+### 10.5 σ-head 解放（独立校准）
+
+- σ 不再路由（router 接管）→ σ 现在纯粹做 calibrated NLL uncertainty
+- D1-c Pearson(σ, err) 测的是 σ 是否与 reconstruction error 正相关（校准）
+- v3/v4 的 D1-c 负相关问题（repulsive 反向打 σ）在 v5 中应缓解：σ 不再受 routing 任务的反向干扰
+
+### 10.6 训练 step 持久化（Plan agent fix F3）
+
+`register_buffer("training_step", ..., persistent=True)`（v4 是 False）。原因：v4 trainer 的 `fill_(completed_steps)` 在 `_train_step` 之后才执行，resume 时第一个 step 看到 step=0（冷启动），bal_T / λ_rep schedule / router warmup 全错。`persistent=True` 让 buffer 进 checkpoint，resume 时从 ckpt 加载正确 step。
+
+### 10.7 7 阈值 — D1-b 替换为 D1-d（router 频率）
+
+| # | 指标 | v1-v4 | v5 |
+|---|---|---|---|
+| 1 | G1_end_min_cos_mean | best-of-K via GT cos | 不变；≥ 0.75 |
+| 2 | G1_end_router_cos_mean (was sigma_cos) | σ-argmin 选中 mode 的 cos | router 选中 mode 的 cos；≥ 0.70（语义一致：模型推理时选中 mode 的质量；只是 routing 来源换了）|
+| 3 | D1-a pairwise cos | 不变 | 不变；∈ [0.30, 0.70] |
+| 4 | **D1-d min_router_freq end / delta** | **(D1-b: hindsight argmin freq, 与 v5 架构无关)** | **NEW: bincount(`π.argmax`).min ≥ 0.10**。Legacy D1-b 仍 collected 作为 cross-version 参考。|
+| 5 | D1-c Pearson(σ, err) | 不变 | 不变；≥ 0.40 |
+| 6 | D2-a cf L1 | 不变 | 不变；≥ 0.05 |
+| 7 | D3-a end/delta gap | 不变 | 不变；≥ 0.05（×2） |
+
+**D1-b → D1-d 重定义的合理性**：D1-b 用 hindsight argmin（GT-aware 评估）测 mode 分化，但 v5 架构的核心改动就是把"训练时 GT-aware 路由 vs 推理 routing"统一了。D1-d（router argmax 分布）测的是模型实际的推理 routing 是否 4-way 分化，与 v5 架构语义匹配。Legacy D1-b 仍 collected，给 cross-version comparison 用。
+
+**v5 success criterion = ≥ 5/7（用 D1-d 替换 D1-b 后）**。
+
+### 10.8 Backward 兼容
+
+- yaml 旗标 `framework.lclgp.use_router: True`（默认 False = v4 行为）
+- v1/v2/v3/v4 yaml 不动，仍载入仍训练
+- `predict_goal` 在 v4 路径下返回 `best_mode_*_sigma`（与 `best_mode_*` 同值）作为 cross-version alias；`best_mode_*_router` 和 `pi_router_*` 仅在 v5 暴露
+
+### 10.9 Phase 1（本次 commit）实施清单
+
+- ✅ `examples/PlanAndVerify/configs/lclgp_v5.yaml` 新建
+- ✅ `lclgp.py` 增 `RoutingModule` class + `_forward_v5` + `predict_goal` 分支
+- ✅ `lclgp.py` `register_buffer` 翻 `persistent=True`
+- ✅ `run_diagnostics.py` `cmd_d1` 增 D1-d（router freq；v4 ckpt N/A）
+- ✅ CPU smoke v5：warmup uniform [0.25×4]、post-warmup gumbel、schedule trace 正确、router 接到 grad 仅在 post-warmup
+- ✅ CPU smoke v4 regression：use_router=False 输出 keys 完全不变；predict_goal API 不变（仅多 `best_mode_*_sigma` 别名，与原值相同）
+
+### 10.10 Phase 2 / 3 — 预期 + Hard Cutoff
+
+- v5 retrain：~50 min on 8×H20（与 v4 同 protocol）
+- v5 诊断（4 cmd × ~1 min）→ paper/tables/lclgp_*.csv 覆盖到 v5
+- §11 retrospective + decision
+
+**Hard cutoff（架构改动唯一一次尝试）**：
+- v5 ≥ 5/7（用 D1-d）→ 升级 baseline_table.csv = v5；进 Stage B 用 v5 plan-prior
+- v5 ≤ 4/7 → **回退 option B**：用 v2 ckpt 当 plan-prior 进 Stage B；mode-balance 留 ablation
+- **没有 v6**。架构改动是 W3 最后一次尝试；进一步 hparam 调试已证 path B 撞顶。

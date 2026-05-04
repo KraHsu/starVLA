@@ -319,7 +319,9 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
 >
 > **v3 retrospective (2026-05-04)**：60 epoch retrain → **2/7 阈值通过（回归）**。λ_rep=0.1 过强：D1-a pairwise cos 0.882→0.149（穿过目标区 [0.3, 0.7] 跌到近正交），D1-c Pearson(σ, err) 0.747→**−0.818** 符号翻转（σ-head 失校准），G1_end_sigma_cos 0.769→0.317（接近随机基线）。**baseline_table.csv 不升级**；下一步 = A（v4 = repulsive 退火 + 减弱）vs B（用 v2 当 plan-prior 进 Stage B），等用户决策。详见 [docs/lclgp_diagnostics.md §8](docs/lclgp_diagnostics.md)。
 >
-> **v4 retrospective (2026-05-04)**：路径 A 完成。60 epoch retrain → **2/7 阈值通过（与 v3 持平、未击穿 v2 4/7）**。三处独立改善：D1-a 0.149→0.227（向目标区移）；|D1-c Pearson| 0.818→0.707（σ-head 部分恢复但仍负相关）；**G1_delta_sigma_cos 0.421→0.837 新通过**（delta 头完全恢复）。但 cov_end k3=100% 仍单 winner（v2 k2=99.6% / v3 k1=99.9% → 只是 winner 旋转）；W&B `pi_bar_end=[0.25, 0.28, 0.23, 0.25]` 训练时均匀 vs 诊断 argmin 单 winner = **soft routing / hard argmin 语义错位**（结构性问题，hparam 无法解；详见 docs §9.4）。**W3 最优仍 v2**；建议下一步 = **B（用 v2 当 plan-prior 进 Stage B）**，等用户确认。详见 [docs/lclgp_diagnostics.md §9](docs/lclgp_diagnostics.md)。
+> **v4 retrospective (2026-05-04)**：路径 A 完成。60 epoch retrain → **2/7 阈值通过（与 v3 持平、未击穿 v2 4/7）**。三处独立改善：D1-a 0.149→0.227（向目标区移）；|D1-c Pearson| 0.818→0.707（σ-head 部分恢复但仍负相关）；**G1_delta_sigma_cos 0.421→0.837 新通过**（delta 头完全恢复）。但 cov_end k3=100% 仍单 winner（v2 k2=99.6% / v3 k1=99.9% → 只是 winner 旋转）；W&B `pi_bar_end=[0.25, 0.28, 0.23, 0.25]` 训练时均匀 vs 诊断 argmin 单 winner = **soft routing / hard argmin 语义错位**（结构性问题，hparam 无法解；详见 docs §9.4）。
+>
+> **v5 设计 (2026-05-04)**：用户决策 **C1+C2+C3 = 全 MoE 化重构**。新增 `RoutingModule(text, z_t) → π_end, π_delta`（two-router shared backbone），Gumbel-softmax STE one-hot；5 损失全 routing-weighted；σ-head 解放（不再路由，纯校准 NLL）；router warmup 500 step（uniform）防 winner snowball；`training_step` 翻 persistent=True 保 resume 安全。Phase 1 完成（commit 待 push）：yaml + 代码 + smoke（v5 + v4 regression 双过）+ §10 docs。Phase 2 = retrain on H20（~50 min）+ 诊断；Phase 3 = §11 retrospective + **hard cutoff**（≥ 5/7 升级 baseline；≤ 4/7 回退 option B；无 v6）。详见 [docs/lclgp_diagnostics.md §10](docs/lclgp_diagnostics.md)。
 
 ### 3.1 模型实现
 
@@ -486,10 +488,43 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
   - **决策**：v4 = 2/7（与 v3 持平、未击穿 v2 4/7）→ baseline_table.csv **不升级**；W3 最优仍 v2
   - **详见**：[docs/lclgp_diagnostics.md §9](docs/lclgp_diagnostics.md)
 
-- [ ] **T-W3.6.6** Stage B / 架构改动决策（**等用户在 A2 / B / C 间二选一**）
-  - **A2. v5 = 进一步退让 path B**：λ_rep_max 0.03→0.01，warmup 1200→2400（off 50%），bal_T_min 0.3→0.5；预期最多回到接近 v2（4/7），mode collapse 仍未解
-  - **B. 用 v2 ckpt 当 plan-prior 进 Stage B（建议）**：driver 训练用 plan-prior 输出做 condition，单 mode 也能进；W3 mode-balance 议题留 ablation；推进 W4
-  - **C. 架构改动**：解决 §9.4 三根因之一（L_bal hard onehot + entropy / L_ctr sum-of-K / explicit routing module）；~1-2 天，正确解但脱离原 design
+- [x] **T-W3.6.6** Stage B / 架构改动决策（用户选 **C1+C2+C3 = 全 MoE 化**）
+  - 候选 A2（hparam 退让）、B（v2 当 plan-prior）、C（架构改动）三选一中决策 C
+  - 详见 [docs/lclgp_diagnostics.md §9.6](docs/lclgp_diagnostics.md) trade-off 表
+  - 30-40% C 失败概率已知；`paper/tables/baseline_table.csv` 仍锁 v2 直到 Phase 3 决策
+
+- [ ] **T-W3.6.7** v5 = explicit MoE routing — Phase 1（代码 + smoke + commit）
+  - **配置**：`examples/PlanAndVerify/configs/lclgp_v5.yaml`（commit 待 push）
+    - `use_router: true` / `gumbel_temperature_init: 5.0` / `gumbel_temperature_min: 0.5` / `router_warmup_steps: 500`
+    - α / β / λ_bal / λ_ctr / λ_cf / λ_rep / λ_rep_warmup_steps / log_sigma_max 全沿用 v4
+  - **代码改动**（lclgp.py，~250 行新增）：
+    - 新 `RoutingModule` class（two-router shared backbone，~30 行）
+    - `__init__` 增 use_router / gumbel_T / warmup_steps 读 yaml；router 条件构造；`training_step` `persistent=True`
+    - `forward` 分发到 `_forward_v4`（旧路径不变）/ `_forward_v5`（新）
+    - `_forward_v5`：router → pi_hard（warmup uniform / Gumbel-STE / eval argmax 三态）→ 5 routing-weighted losses
+    - `predict_goal` 分支：v5 暴露 `best_mode_*_router` + `pi_router_*`；v4 暴露 `best_mode_*_sigma` 别名
+  - **Diagnostics**：`run_diagnostics.py` `cmd_d1` 增 D1-d（router argmax 频率分布）；v4 ckpt N/A
+  - **CPU smoke 已过**：
+    - v5: warmup 严格 uniform [0.25×4]、post-warmup gumbel 采样、eval 确定性 argmax、router warmup 后接 grad、所有 K mode 头 warmup 时拿到 grad
+    - v4 regression: use_router=False 输出 keys 完全不变；predict_goal API 不变（仅多 sigma 别名 同值）
+  - **Phase 2（数据机回流）**：
+    ```bash
+    git pull origin pav-dev
+    CONFIG_YAML=examples/PlanAndVerify/configs/lclgp_v5.yaml \
+    RUN_ID=pav_w3_lclgp_v5 \
+    bash examples/PlanAndVerify/train_files/run_lclgp.sh
+    CKPT=playground/Checkpoints/pav_w3_lclgp_v5/final_model/pytorch_model.pt
+    for cmd in g1 d1 d2 d3; do
+      .venv/bin/python examples/PlanAndVerify/scripts/run_diagnostics.py $cmd \
+        --config_yaml $CFG --checkpoint $CKPT --cuda --batch_size 16 --output_dir paper
+    done
+    ```
+  - **Phase 3 — Hard cutoff**（架构改动唯一一次尝试）：
+    - v5 ≥ 5/7（用 D1-d 替换 D1-b）→ 升级 baseline_table.csv = v5；进 Stage B 用 v5 plan-prior
+    - v5 ≤ 4/7 → **回退 option B**：用 v2 ckpt 当 plan-prior 进 Stage B；mode-balance 留 W3 ablation
+    - **没有 v6**。Phase 3 后无论结果如何，T-W3.6.7 关闭，进入 W4
+  - **关键 W&B 监测点**：`gumbel_temperature_current`（5.0→0.5 anneal）、`pi_router_end_min` / `pi_router_delta_min`（routing 是否塌缩）、`router_warmup_active`（step < 500）、`mode_argmin_end` 直方图（router 选中的 mode 分布）
+  - **详见**：[docs/lclgp_diagnostics.md §10](docs/lclgp_diagnostics.md)
 
 ---
 

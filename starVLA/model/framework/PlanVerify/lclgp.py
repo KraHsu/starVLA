@@ -102,6 +102,41 @@ class LCLGPDecoderLayer(nn.Module):
         return x
 
 
+class RoutingModule(nn.Module):
+    """W3 v5 — explicit MoE-style routing: π_end, π_delta = Pi(text, z_t).
+
+    Two K-way heads sharing a (text, z_t) backbone — user-decided over a single
+    router (see ``docs/lclgp_diagnostics.md`` §10). End and delta routings can
+    legitimately differ given the empirical end-vs-delta difficulty asymmetry
+    (G1_end_min_cos ≈ 0.79 vs G1_delta_min_cos ≈ 0.99 in v2-v4).
+
+    No GT used → routing is available at inference. Outputs Gumbel-softmax
+    one-hot (forward) with soft STE (backward) during training; argmax-one-hot
+    at inference.
+    """
+
+    def __init__(self, d_text: int, d_latent: int, d_hidden: int, K: int):
+        super().__init__()
+        # Shared backbone — projects text-pool and z_t-pool into d_hidden.
+        self.text_proj = nn.Linear(d_text, d_hidden)
+        self.zt_proj = nn.Linear(d_latent, d_hidden)
+        self.shared = nn.Sequential(nn.Linear(d_hidden, d_hidden), nn.GELU())
+        # Split K-heads for end / delta — independent routing for the two timescales.
+        self.head_end = nn.Linear(d_hidden, K)
+        self.head_delta = nn.Linear(d_hidden, K)
+
+    def forward(
+        self, text_emb: torch.Tensor, text_mask: torch.Tensor, z_t: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Mask-aware mean-pool over text (PyTorch convention here is W2's:
+        # text_mask True = valid token), simple mean-pool over z_t patches.
+        mask_f = text_mask.float().unsqueeze(-1)  # [B, L, 1]
+        text_pool = (text_emb * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1.0)
+        zt_pool = z_t.mean(dim=1)  # [B, d_latent]
+        feat = self.shared(self.text_proj(text_pool) + self.zt_proj(zt_pool))
+        return self.head_end(feat), self.head_delta(feat)  # logits [B, K] each
+
+
 @FRAMEWORK_REGISTRY.register("LCLGP")
 class LCLGP(baseframework):
     """Language-Conditioned Latent Goal Projection."""
@@ -153,9 +188,37 @@ class LCLGP(baseframework):
         )
         # Schedule horizon for bal_T anneal — read from trainer.max_train_steps.
         self.total_steps_for_schedule = int(_get(config, "trainer", "max_train_steps", default=4800))
+
+        # ===== W3 v5 — explicit MoE routing (C1+C2+C3) ======================
+        # When ``use_router`` is True, an explicit ``RoutingModule`` produces
+        # π_end / π_delta from (text, z_t) only — no GT, available at inference.
+        # All 5 losses route through π (Gumbel-softmax STE one-hot). σ-head is
+        # freed from routing duty (purely calibrated NLL uncertainty).
+        # See docs/lclgp_diagnostics.md §10 for design and threshold redefinition.
+        # Default False preserves v1-v4 behavior (softmin-based implicit routing).
+        self.use_router = bool(_get(config, "framework", "lclgp", "use_router", default=False))
+        # Gumbel temperature linear anneal: high → exploratory; low → near-discrete.
+        # 5.0 → 0.5 over training (less extreme than v3's 1.0 → 0.1, which decalibrated σ).
+        self.gumbel_temperature_init = float(
+            _get(config, "framework", "lclgp", "gumbel_temperature_init", default=5.0)
+        )
+        self.gumbel_temperature_min = float(
+            _get(config, "framework", "lclgp", "gumbel_temperature_min", default=0.5)
+        )
+        # Router warmup: for first N steps, override π with deterministic uniform
+        # (pi_hard[b, k] = 1 if k == b % K else 0). All K mode heads receive recon
+        # gradient → prevents winner-takes-all snowball at L_recon level.
+        self.router_warmup_steps = int(
+            _get(config, "framework", "lclgp", "router_warmup_steps", default=500)
+        )
+
         # Step counter updated externally by the trainer each accelerator step.
-        # Non-persistent (resume reloads completed_steps and re-fills, no need to checkpoint).
-        self.register_buffer("training_step", torch.zeros((), dtype=torch.long), persistent=False)
+        # Persistent (W3 v5 fix): bal_T anneal, λ_rep schedule, gumbel temp anneal,
+        # and router warmup all depend on training_step. ``persistent=True`` means
+        # the buffer is saved/loaded with the checkpoint, so resume reads the
+        # correct step before the first forward (otherwise fill_(completed_steps)
+        # in the trainer happens AFTER train_step, leaving step 0 of resume cold).
+        self.register_buffer("training_step", torch.zeros((), dtype=torch.long), persistent=True)
 
         # --- Modules --------------------------------------------------------
         self.text_proj = nn.Linear(self.d_text, self.d_hidden)
@@ -187,6 +250,15 @@ class LCLGP(baseframework):
         self.out_delta = nn.Linear(self.d_hidden, self.d_latent)
         self.unc_end = nn.Linear(self.d_hidden, 1)
         self.unc_delta = nn.Linear(self.d_hidden, 1)
+
+        # W3 v5 — explicit routing module (only built when ``use_router`` is True).
+        # Kept outside the conditional below so v1-v4 yamls (no use_router key)
+        # continue to construct LCLGP without an unused router.
+        self.router = (
+            RoutingModule(self.d_text, self.d_latent, self.d_hidden, self.K)
+            if self.use_router
+            else None
+        )
 
     # ------------------------------------------------------------------
     # Core forward: text + z_t → multimodal goals
@@ -354,6 +426,157 @@ class LCLGP(baseframework):
     # ------------------------------------------------------------------
 
     def forward(self, batch: Dict[str, Any], gather_fn=None) -> Dict[str, torch.Tensor]:
+        """Dispatch to v1-v4 (implicit softmin routing) or v5 (explicit MoE).
+
+        See ``docs/lclgp_diagnostics.md`` §1-§9 for the v1-v4 history that
+        motivated v5; §10 for the v5 architectural design.
+        """
+        if self.use_router:
+            return self._forward_v5(batch, gather_fn=gather_fn)
+        return self._forward_v4(batch, gather_fn=gather_fn)
+
+    def _forward_v5(self, batch: Dict[str, Any], gather_fn=None) -> Dict[str, torch.Tensor]:
+        """W3 v5 — explicit MoE routing (C1+C2+C3).
+
+        Router(text, z_t) → (π_end, π_delta) ∈ Δ^K. Gumbel-softmax STE one-hot
+        forward + soft backward during training; argmax-one-hot at inference.
+        All 5 losses route through π. σ-head is freed from routing duty (purely
+        calibrated NLL uncertainty). Router warmup (deterministic uniform) for
+        first ``router_warmup_steps`` keeps all K mode heads alive while router
+        is still untrained. See ``docs/lclgp_diagnostics.md`` §10.
+        """
+        text_emb = batch["text_emb"]
+        text_mask = batch["text_mask"]
+        z_t = batch["z_t"]
+        z_delta = batch["z_delta"]
+        z_end = batch["z_end"]
+
+        compute_dtype = self.text_proj.weight.dtype
+        z_delta = z_delta.to(compute_dtype)
+        z_end = z_end.to(compute_dtype)
+
+        # Per-batch z_t dropout (training only) — D2 regularizer (unchanged from v4).
+        z_t_input = z_t
+        if self.training and self.z_dropout > 0 and torch.rand((), device=z_t.device).item() < self.z_dropout:
+            z_t_input = torch.zeros_like(z_t)
+
+        # Forward core: K mode outputs + per-mode log_sigma (unchanged from v4).
+        z_g_end, log_s_end, z_g_delta, log_s_delta = self._forward_core(text_emb, text_mask, z_t_input)
+        B = z_g_end.shape[0]
+
+        # ===== Routing =====================================================
+        # Always run the router (gradient through L_bal even during warmup).
+        logits_end, logits_delta = self.router(text_emb, text_mask, z_t_input)
+
+        # Gumbel temperature linear anneal: T_init → T_min over total_steps.
+        progress = (self.training_step.float() / max(1, self.total_steps_for_schedule)).clamp(0.0, 1.0)
+        current_gumbel_T = self.gumbel_temperature_init - (
+            self.gumbel_temperature_init - self.gumbel_temperature_min
+        ) * progress
+
+        # Routing decision branches by (training, in_warmup):
+        # - eval: deterministic argmax (no Gumbel sampling) — Plan agent fix F2
+        # - training, in_warmup: deterministic uniform π[b, k] = 1 if k == b % K
+        #   (all K mode heads receive recon gradient → prevents L_recon snowball)
+        # - training, post-warmup: Gumbel-softmax STE one-hot
+        in_warmup = self.training and (int(self.training_step.item()) < self.router_warmup_steps)
+        if not self.training:
+            # Inference: deterministic argmax.
+            pi_hard_end = F.one_hot(logits_end.argmax(dim=-1), num_classes=self.K).to(z_g_end.dtype)
+            pi_hard_delta = F.one_hot(logits_delta.argmax(dim=-1), num_classes=self.K).to(z_g_end.dtype)
+        elif in_warmup:
+            idx_b = torch.arange(B, device=z_g_end.device)
+            uniform_one_hot = F.one_hot(idx_b % self.K, num_classes=self.K).to(z_g_end.dtype)
+            pi_hard_end = uniform_one_hot
+            pi_hard_delta = uniform_one_hot
+        else:
+            # Gumbel-softmax requires float32 for stability; cast back to dtype after.
+            tau = float(current_gumbel_T.item())
+            pi_hard_end = F.gumbel_softmax(logits_end.float(), tau=tau, hard=True).to(z_g_end.dtype)
+            pi_hard_delta = F.gumbel_softmax(logits_delta.float(), tau=tau, hard=True).to(z_g_end.dtype)
+
+        chosen_end = pi_hard_end.argmax(dim=-1)        # [B]
+        chosen_delta = pi_hard_delta.argmax(dim=-1)    # [B]
+
+        # ===== L_recon (routing-weighted) =================================
+        # Per-mode heteroscedastic L1 NLL (same fn as v4); the change is the reduction:
+        # v4: min-of-K (only winner gets gradient → snowball)
+        # v5: routing-weighted (chosen mode gets recon, with soft STE through router)
+        per_mode_nll_end = self._heteroscedastic_per_mode(z_g_end, z_end, log_s_end)        # [B, K]
+        per_mode_nll_delta = self._heteroscedastic_per_mode(z_g_delta, z_delta, log_s_delta)
+        l_recon_end = (pi_hard_end * per_mode_nll_end).sum(dim=-1).mean()
+        l_recon_delta = (pi_hard_delta * per_mode_nll_delta).sum(dim=-1).mean()
+
+        # ===== L_bal (KL of router routing distribution || Uniform) =======
+        # Direct KL on pi_hard.mean(0) — no softmin shim. With one-hot pi_hard,
+        # equalizing pi_bar requires actually different samples picking different modes.
+        pi_bar_end = pi_hard_end.mean(dim=0)           # [K]
+        pi_bar_delta = pi_hard_delta.mean(dim=0)
+        uniform = 1.0 / self.K
+        l_bal_end = (pi_bar_end * ((pi_bar_end + 1e-8) / uniform).log()).sum()
+        l_bal_delta = (pi_bar_delta * ((pi_bar_delta + 1e-8) / uniform).log()).sum()
+
+        # ===== L_repulsive (mode outputs in latent space; unchanged from v4) =
+        if self.lambda_rep > 0.0:
+            l_rep_end = self._mode_repulsive_loss(z_g_end)
+            l_rep_delta = self._mode_repulsive_loss(z_g_delta)
+            if self.lambda_rep_warmup_steps > 0:
+                _step_f = self.training_step.float()
+                _ramp_total = max(1, self.total_steps_for_schedule - self.lambda_rep_warmup_steps)
+                _ramp_progress = ((_step_f - self.lambda_rep_warmup_steps) / _ramp_total).clamp(0.0, 1.0)
+                current_lambda_rep = self.lambda_rep * _ramp_progress
+            else:
+                current_lambda_rep = z_g_end.new_tensor(self.lambda_rep)
+        else:
+            l_rep_end = z_g_end.new_zeros(())
+            l_rep_delta = z_g_end.new_zeros(())
+            current_lambda_rep = z_g_end.new_zeros(())
+
+        # ===== L_ctr (router-chosen positive replaces hindsight argmin) ===
+        l_ctr = self._info_nce_loss(z_g_end, chosen_end, z_end, gather_fn=gather_fn)
+
+        # ===== L_cf (CF reuses main pass's chosen_end; not re-routed) =====
+        # Tests "removing z_t affects output for the SAME chosen plan", not
+        # "removing z_t affects which plan is chosen" — Plan agent fix F1.
+        l_cf = self._counterfactual_loss(z_g_end, chosen_end, text_emb, text_mask, z_t)
+
+        # ===== Total =======================================================
+        total = (
+            self.alpha * l_recon_end
+            + (1.0 - self.alpha) * l_recon_delta
+            + self.lambda_bal * (l_bal_end + l_bal_delta)
+            + self.lambda_ctr * l_ctr
+            + self.lambda_cf * l_cf
+            + current_lambda_rep * (l_rep_end + l_rep_delta) / 2.0
+        )
+
+        return {
+            "loss": total,
+            "l_recon_end": l_recon_end.detach(),
+            "l_recon_delta": l_recon_delta.detach(),
+            "l_bal_end": l_bal_end.detach(),
+            "l_bal_delta": l_bal_delta.detach(),
+            "l_ctr": l_ctr.detach(),
+            "l_cf": l_cf.detach(),
+            "l_rep_end": l_rep_end.detach(),
+            "l_rep_delta": l_rep_delta.detach(),
+            "gumbel_temperature_current": current_gumbel_T.detach(),
+            "lambda_rep_current": current_lambda_rep.detach(),
+            "router_warmup_active": z_g_end.new_tensor(1.0 if in_warmup else 0.0),
+            "sigma_end_mean": log_s_end.exp().mean().detach(),
+            "sigma_delta_mean": log_s_delta.exp().mean().detach(),
+            "mode_balance_std_end": pi_bar_end.detach().std(),
+            "mode_balance_std_delta": pi_bar_delta.detach().std(),
+            "mode_argmin_end": chosen_end.detach(),       # router-chosen (same key as v4 for downstream)
+            "mode_argmin_delta": chosen_delta.detach(),
+            "pi_bar_end": pi_bar_end.detach(),
+            "pi_bar_delta": pi_bar_delta.detach(),
+            "pi_router_end_min": pi_bar_end.detach().min(),
+            "pi_router_delta_min": pi_bar_delta.detach().min(),
+        }
+
+    def _forward_v4(self, batch: Dict[str, Any], gather_fn=None) -> Dict[str, torch.Tensor]:
+        """W3 v1-v4 path — implicit softmin routing on hindsight per_mode_loss."""
         text_emb = batch["text_emb"]
         text_mask = batch["text_mask"]
         z_t = batch["z_t"]
@@ -451,26 +674,58 @@ class LCLGP(baseframework):
 
     @torch.no_grad()
     def predict_goal(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        """Inference-time best-mode goal projection. Used by run_diagnostics.py."""
+        """Inference-time best-mode goal projection. Used by run_diagnostics.py.
+
+        v1-v4: ``best_mode_*`` is the σ-argmin (min-σ heuristic at inference).
+        v5: ``best_mode_*`` is the router argmax (deterministic, no Gumbel
+        sampling). σ-argmin is also returned as ``best_mode_*_sigma`` for
+        cross-check / D1-c calibration test. Router probabilities returned
+        as ``pi_router_*`` for D1-d (router routing distribution).
+        """
         text_emb = batch["text_emb"]
         text_mask = batch["text_mask"]
         z_t = batch["z_t"]
         z_g_end, log_s_end, z_g_delta, log_s_delta = self._forward_core(text_emb, text_mask, z_t)
-        # Best mode by lowest σ — at inference there is no ground truth, so we pick the
-        # most confident mode per timescale. Diagnostics may also use all K modes.
-        best_end = log_s_end.argmin(dim=-1)
-        best_delta = log_s_delta.argmin(dim=-1)
+
+        # Always compute σ-argmin (legacy / cross-check).
+        best_end_sigma = log_s_end.argmin(dim=-1)
+        best_delta_sigma = log_s_delta.argmin(dim=-1)
+
+        if self.use_router:
+            logits_end, logits_delta = self.router(text_emb, text_mask, z_t)
+            best_end_router = logits_end.argmax(dim=-1)
+            best_delta_router = logits_delta.argmax(dim=-1)
+            chosen_end = best_end_router
+            chosen_delta = best_delta_router
+            pi_router_end = F.softmax(logits_end, dim=-1)      # [B, K] for D1-d
+            pi_router_delta = F.softmax(logits_delta, dim=-1)
+        else:
+            chosen_end = best_end_sigma
+            chosen_delta = best_delta_sigma
+            best_end_router = None
+            best_delta_router = None
+            pi_router_end = None
+            pi_router_delta = None
+
         idx = torch.arange(z_g_end.shape[0], device=z_g_end.device)
-        return {
-            "z_g_end_best": z_g_end[idx, best_end],          # [B, N, D_lat]
-            "z_g_delta_best": z_g_delta[idx, best_delta],
-            "z_g_end_all": z_g_end,                          # [B, K, N, D_lat]
+        out: Dict[str, torch.Tensor] = {
+            "z_g_end_best": z_g_end[idx, chosen_end],            # [B, N, D_lat]
+            "z_g_delta_best": z_g_delta[idx, chosen_delta],
+            "z_g_end_all": z_g_end,                              # [B, K, N, D_lat]
             "z_g_delta_all": z_g_delta,
-            "log_sigma_end": log_s_end,                      # [B, K]
+            "log_sigma_end": log_s_end,                          # [B, K]
             "log_sigma_delta": log_s_delta,
-            "best_mode_end": best_end,                       # [B]
-            "best_mode_delta": best_delta,
+            "best_mode_end": chosen_end,                         # [B] — primary chosen mode
+            "best_mode_delta": chosen_delta,
+            "best_mode_end_sigma": best_end_sigma,               # [B] — σ-argmin (cross-check)
+            "best_mode_delta_sigma": best_delta_sigma,
         }
+        if self.use_router:
+            out["best_mode_end_router"] = best_end_router         # type: ignore[assignment]
+            out["best_mode_delta_router"] = best_delta_router     # type: ignore[assignment]
+            out["pi_router_end"] = pi_router_end                  # type: ignore[assignment]
+            out["pi_router_delta"] = pi_router_delta              # type: ignore[assignment]
+        return out
 
 
 # ---------------------------------------------------------------------------

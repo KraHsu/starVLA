@@ -145,6 +145,11 @@ def cmd_d1(args, cfg, model, device) -> None:
     mode_argmin_delta_acc: List[torch.Tensor] = []
     sigma_acc: List[torch.Tensor] = []
     err_acc: List[torch.Tensor] = []
+    # W3 v5 — D1-d router routing distribution. Populated only when
+    # ``predict_goal`` returns ``pi_router_*`` (i.e., ``use_router=True``).
+    # v4 ckpts: lists stay empty; D1-d row reports N/A.
+    router_argmax_end_acc: List[torch.Tensor] = []
+    router_argmax_delta_acc: List[torch.Tensor] = []
 
     K = model.K
 
@@ -163,7 +168,8 @@ def cmd_d1(args, cfg, model, device) -> None:
             pair_cos = cos_mat[:, tri].mean(dim=-1)                # [B]
             pairwise_cos_acc.append(pair_cos.cpu())
 
-            # D1-b: argmin (per sample) under heteroscedastic loss → mode coverage.
+            # D1-b (legacy, hindsight argmin): per sample under heteroscedastic loss.
+            # Kept for cross-version comparison. v5 success criterion uses D1-d (router).
             z_end_pool = patch_mean(batch["z_end"]).unsqueeze(1).to(pool_end.dtype)   # [B, 1, D]
             l1_end = (pool_end - z_end_pool).abs().mean(dim=-1)                       # [B, K]
             sigma_end = out["log_sigma_end"].exp()
@@ -178,9 +184,15 @@ def cmd_d1(args, cfg, model, device) -> None:
             per_mode_delta = l1_delta / sigma_delta + 0.1 * out["log_sigma_delta"]
             mode_argmin_delta_acc.append(per_mode_delta.argmin(dim=-1).cpu())
 
-            # D1-c: σ vs error correlation.
+            # D1-c: σ vs error correlation (calibration test).
             sigma_acc.append(sigma_end.flatten().cpu())
             err_acc.append(l1_end.flatten().cpu())
+
+            # D1-d (W3 v5): router output distribution. Only collected when
+            # ``predict_goal`` exposes ``pi_router_*`` (i.e., ``use_router=True``).
+            if "pi_router_end" in out and out["pi_router_end"] is not None:
+                router_argmax_end_acc.append(out["pi_router_end"].argmax(dim=-1).cpu())
+                router_argmax_delta_acc.append(out["pi_router_delta"].argmax(dim=-1).cpu())
 
     pair_cos = torch.cat(pairwise_cos_acc)
     argmin_end = torch.cat(mode_argmin_end_acc)
@@ -206,6 +218,36 @@ def cmd_d1(args, cfg, model, device) -> None:
     for k in range(K):
         rows.append({"metric": f"D1b_cov_end_k{k}", "value": float(cov_end[k]),
                      "threshold_low": None, "threshold_high": None, "pass": ""})
+
+    # D1-d (W3 v5 — primary success criterion): router routing distribution.
+    # Threshold: min router freq ≥ 0.10. Same threshold as legacy D1-b but on
+    # router output (no GT used) rather than hindsight argmin (uses GT). The v5
+    # architecture explicitly addresses the L_bal/argmin mismatch (docs §9.4),
+    # so the v5 success metric must measure the new architecture's behavior
+    # not the v4 one. Cross-version comparison: legacy D1-b stays in the table.
+    if router_argmax_end_acc:
+        ra_end = torch.cat(router_argmax_end_acc)
+        ra_delta = torch.cat(router_argmax_delta_acc)
+        cov_router_end = torch.bincount(ra_end, minlength=K).float() / ra_end.numel()
+        cov_router_delta = torch.bincount(ra_delta, minlength=K).float() / ra_delta.numel()
+        rows.append({"metric": "D1d_min_router_freq_end", "value": float(cov_router_end.min()),
+                     "threshold_low": 0.10, "threshold_high": None,
+                     "pass": bool(cov_router_end.min() >= 0.10)})
+        rows.append({"metric": "D1d_min_router_freq_delta", "value": float(cov_router_delta.min()),
+                     "threshold_low": 0.10, "threshold_high": None,
+                     "pass": bool(cov_router_delta.min() >= 0.10)})
+        for k in range(K):
+            rows.append({"metric": f"D1d_router_freq_end_k{k}", "value": float(cov_router_end[k]),
+                         "threshold_low": None, "threshold_high": None, "pass": ""})
+        for k in range(K):
+            rows.append({"metric": f"D1d_router_freq_delta_k{k}", "value": float(cov_router_delta[k]),
+                         "threshold_low": None, "threshold_high": None, "pass": ""})
+    else:
+        rows.append({"metric": "D1d_min_router_freq_end", "value": float("nan"),
+                     "threshold_low": 0.10, "threshold_high": None, "pass": "N/A (use_router=False)"})
+        rows.append({"metric": "D1d_min_router_freq_delta", "value": float("nan"),
+                     "threshold_low": 0.10, "threshold_high": None, "pass": "N/A (use_router=False)"})
+
     write_csv(Path(args.output_dir) / "tables" / "lclgp_d1.csv", rows,
               ["metric", "value", "threshold_low", "threshold_high", "pass"])
 
