@@ -9,9 +9,10 @@ BATCH_SIZE="${5:-8}"
 NUM_WORKERS="${6:-1}"
 DTYPE="${7:-bf16}"
 MAX_GPU_MEMORY_GB="${8:-100}"
+RETRY_SLEEP_SECONDS="${9:-15}"
 
 if [[ -z "${CKPT_PATH}" ]]; then
-  echo "Usage: $0 [CONFIG_YAML] CKPT_PATH [OUT_DIR] [NUM_HISTORY_FRAMES] [BATCH_SIZE] [NUM_WORKERS] [DTYPE] [MAX_GPU_MEMORY_GB]" >&2
+  echo "Usage: $0 [CONFIG_YAML] CKPT_PATH [OUT_DIR] [NUM_HISTORY_FRAMES] [BATCH_SIZE] [NUM_WORKERS] [DTYPE] [MAX_GPU_MEMORY_GB] [RETRY_SLEEP_SECONDS]" >&2
   echo "Example:" >&2
   echo "  $0 examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml ./playground/Pretrained_models/vjepa2_vitg/vjepa2_1_vitb_dist_vitG_384.pt" >&2
   exit 1
@@ -30,31 +31,104 @@ echo "    batch:  ${BATCH_SIZE}"
 echo "    workers:${NUM_WORKERS}"
 echo "    dtype:  ${DTYPE}"
 echo "    max GPU memory/process: ${MAX_GPU_MEMORY_GB} GiB"
+echo "    retry sleep: ${RETRY_SLEEP_SECONDS}s"
 echo "    logs:   ${LOG_DIR}"
 echo "    thread env: OMP/MKL/OPENBLAS/NUMEXPR=1"
 
+stop_requested=0
 pids=()
+
+cleanup() {
+  local exit_code=$?
+  trap - INT TERM HUP EXIT
+  if [[ "${stop_requested}" -eq 0 ]]; then
+    stop_requested=1
+    echo "==> Stopping V-JEPA cache launcher; terminating child processes ..."
+  fi
+
+  for pid in "${pids[@]:-}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      pkill -TERM -P "${pid}" 2>/dev/null || true
+      kill -TERM "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
+    fi
+  done
+
+  sleep 2
+
+  for pid in "${pids[@]:-}"; do
+    if kill -0 "${pid}" 2>/dev/null; then
+      pkill -KILL -P "${pid}" 2>/dev/null || true
+      kill -KILL "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+    fi
+  done
+
+  wait 2>/dev/null || true
+  exit "${exit_code}"
+}
+
+handle_signal() {
+  stop_requested=1
+  cleanup
+}
+
+trap handle_signal INT TERM HUP
+trap cleanup EXIT
+
+run_shard_until_done() {
+  local shard_id="$1"
+  local log_file="${LOG_DIR}/extract_shard_${shard_id}.log"
+  local attempt=1
+
+  while true; do
+    {
+      echo
+      echo "================================================================================"
+      echo "==> $(date '+%Y-%m-%d %H:%M:%S') shard ${shard_id}/${NUM_SHARDS} attempt ${attempt} starting on CUDA_VISIBLE_DEVICES=${shard_id}"
+      echo "================================================================================"
+    } >>"${log_file}"
+
+    set +e
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    CUDA_VISIBLE_DEVICES="${shard_id}" \
+      .venv/bin/python examples/PlanAndVerify/cache_files/extract_vjepa_cache.py \
+        --config_yaml "${CONFIG_YAML}" \
+        --dataset_name libero_goal \
+        --camera_key video.primary_image \
+        --vjepa_ckpt "${CKPT_PATH}" \
+        --output_dir "${OUT_DIR}" \
+        --num_history_frames "${NUM_HISTORY_FRAMES}" \
+        --batch_size "${BATCH_SIZE}" \
+        --num_workers "${NUM_WORKERS}" \
+        --device cuda:0 \
+        --dtype "${DTYPE}" \
+        --max_gpu_memory_gb "${MAX_GPU_MEMORY_GB}" \
+        --num_shards "${NUM_SHARDS}" \
+        --shard_id "${shard_id}" \
+        >>"${log_file}" 2>&1
+    local status=$?
+    set -e
+
+    if [[ "${status}" -eq 0 ]]; then
+      echo "==> $(date '+%Y-%m-%d %H:%M:%S') shard ${shard_id} finished" >>"${log_file}"
+      return 0
+    fi
+
+    {
+      echo "==> $(date '+%Y-%m-%d %H:%M:%S') shard ${shard_id} failed with exit code ${status}"
+      echo "==> Retrying shard ${shard_id} after ${RETRY_SLEEP_SECONDS}s; completed episodes will be skipped"
+    } >>"${log_file}"
+    sleep "${RETRY_SLEEP_SECONDS}"
+    attempt=$((attempt + 1))
+  done
+}
+
 for SHARD_ID in $(seq 0 7); do
   LOG_FILE="${LOG_DIR}/extract_shard_${SHARD_ID}.log"
   echo "==> Launch shard ${SHARD_ID}/${NUM_SHARDS} on CUDA_VISIBLE_DEVICES=${SHARD_ID}; log=${LOG_FILE}"
-  OMP_NUM_THREADS=1 \
-  MKL_NUM_THREADS=1 \
-  OPENBLAS_NUM_THREADS=1 \
-  NUMEXPR_NUM_THREADS=1 \
-  CUDA_VISIBLE_DEVICES="${SHARD_ID}" \
-    .venv/bin/python examples/PlanAndVerify/cache_files/extract_vjepa_cache.py \
-      --config_yaml "${CONFIG_YAML}" \
-      --dataset_name libero_goal \
-      --camera_key video.primary_image \
-      --vjepa_ckpt "${CKPT_PATH}" \
-      --output_dir "${OUT_DIR}" \
-      --num_history_frames "${NUM_HISTORY_FRAMES}" \
-      --batch_size "${BATCH_SIZE}" \
-      --num_workers "${NUM_WORKERS}" \
-      --device cuda:0 \
-      --dtype "${DTYPE}" \
-      --max_gpu_memory_gb "${MAX_GPU_MEMORY_GB}" \
-      >"${LOG_FILE}" 2>&1 &
+  run_shard_until_done "${SHARD_ID}" &
   pids+=("$!")
 done
 
@@ -73,6 +147,8 @@ if [[ "${failed}" -ne 0 ]]; then
   echo "[FAIL] At least one shard failed" >&2
   exit 1
 fi
+
+trap - INT TERM HUP EXIT
 
 echo "==> All shards finished"
 echo "==> Cache index: ${OUT_DIR}/index.json"
