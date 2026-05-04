@@ -161,12 +161,14 @@ def cmd_d1(args, cfg, model, device) -> None:
             pool_end = patch_mean(out["z_g_end_all"])              # [B, K, D]
             B = pool_end.shape[0]
 
-            # D1-a: pairwise cosine across modes.
-            pool_end_n = torch.nn.functional.normalize(pool_end.float(), dim=-1)
-            cos_mat = pool_end_n @ pool_end_n.transpose(-2, -1)    # [B, K, K]
-            tri = torch.triu(torch.ones(K, K, device=cos_mat.device, dtype=torch.bool), diagonal=1)
-            pair_cos = cos_mat[:, tri].mean(dim=-1)                # [B]
-            pairwise_cos_acc.append(pair_cos.cpu())
+            # D1-a: pairwise cosine across modes. Skip under K=1 (no pairs);
+            # row written below as N/A.
+            if K >= 2:
+                pool_end_n = torch.nn.functional.normalize(pool_end.float(), dim=-1)
+                cos_mat = pool_end_n @ pool_end_n.transpose(-2, -1)    # [B, K, K]
+                tri = torch.triu(torch.ones(K, K, device=cos_mat.device, dtype=torch.bool), diagonal=1)
+                pair_cos = cos_mat[:, tri].mean(dim=-1)                # [B]
+                pairwise_cos_acc.append(pair_cos.cpu())
 
             # D1-b (legacy, hindsight argmin): per sample under heteroscedastic loss.
             # Kept for cross-version comparison. v5 success criterion uses D1-d (router).
@@ -194,7 +196,6 @@ def cmd_d1(args, cfg, model, device) -> None:
                 router_argmax_end_acc.append(out["pi_router_end"].argmax(dim=-1).cpu())
                 router_argmax_delta_acc.append(out["pi_router_delta"].argmax(dim=-1).cpu())
 
-    pair_cos = torch.cat(pairwise_cos_acc)
     argmin_end = torch.cat(mode_argmin_end_acc)
     argmin_delta = torch.cat(mode_argmin_delta_acc)
     sig = torch.cat(sigma_acc).numpy()
@@ -205,13 +206,34 @@ def cmd_d1(args, cfg, model, device) -> None:
 
     pearson = float(np.corrcoef(sig, err)[0, 1]) if sig.size > 1 else float("nan")
 
+    # D1-a row: N/A under K=1 (no mode pairs); aggregated value otherwise.
+    if K >= 2:
+        pair_cos = torch.cat(pairwise_cos_acc)
+        d1a_row = {"metric": "D1a_mean_pairwise_cos", "value": float(pair_cos.mean()),
+                   "threshold_low": 0.30, "threshold_high": 0.70,
+                   "pass": bool(0.30 <= pair_cos.mean() <= 0.70)}
+    else:
+        d1a_row = {"metric": "D1a_mean_pairwise_cos", "value": float("nan"),
+                   "threshold_low": 0.30, "threshold_high": 0.70, "pass": "N/A (K=1)"}
+    # D1-b min mode freq: trivially 1.0 under K=1 — not a meaningful test
+    # of mode balance with a single mode. Mark N/A so the table doesn't
+    # report a false-positive pass.
+    if K >= 2:
+        d1b_end_row = {"metric": "D1b_min_mode_freq_end", "value": float(cov_end.min()),
+                       "threshold_low": 0.10, "threshold_high": None,
+                       "pass": bool(cov_end.min() >= 0.10)}
+        d1b_delta_row = {"metric": "D1b_min_mode_freq_delta", "value": float(cov_delta.min()),
+                         "threshold_low": 0.10, "threshold_high": None,
+                         "pass": bool(cov_delta.min() >= 0.10)}
+    else:
+        d1b_end_row = {"metric": "D1b_min_mode_freq_end", "value": 1.0,
+                       "threshold_low": 0.10, "threshold_high": None, "pass": "N/A (K=1)"}
+        d1b_delta_row = {"metric": "D1b_min_mode_freq_delta", "value": 1.0,
+                         "threshold_low": 0.10, "threshold_high": None, "pass": "N/A (K=1)"}
     rows = [
-        {"metric": "D1a_mean_pairwise_cos", "value": float(pair_cos.mean()),
-         "threshold_low": 0.30, "threshold_high": 0.70, "pass": bool(0.30 <= pair_cos.mean() <= 0.70)},
-        {"metric": "D1b_min_mode_freq_end", "value": float(cov_end.min()),
-         "threshold_low": 0.10, "threshold_high": None, "pass": bool(cov_end.min() >= 0.10)},
-        {"metric": "D1b_min_mode_freq_delta", "value": float(cov_delta.min()),
-         "threshold_low": 0.10, "threshold_high": None, "pass": bool(cov_delta.min() >= 0.10)},
+        d1a_row,
+        d1b_end_row,
+        d1b_delta_row,
         {"metric": "D1c_pearson_sigma_err",  "value": pearson,
          "threshold_low": 0.40, "threshold_high": None, "pass": bool(pearson >= 0.40)},
     ]

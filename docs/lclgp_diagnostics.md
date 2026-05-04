@@ -748,5 +748,99 @@ C1+C2+C3 一次同时动了 3 个旋钮(Gumbel 路由、routing-weighted recon�
 ```
 e81d306 [PAV] feat: LCLGP v5 — explicit MoE routing (C1+C2+C3)        # Phase 1 代码
 772deee [PAV] fix: cast fp16 batch dtype at RoutingModule entry        # 诊断阻塞修复
-<下一 commit> [PAV] data: LCLGP v5 retrain diagnostics — 1/7, hard cutoff → option B
+a47e3bc [PAV] data: LCLGP v5 retrain diagnostics — 1/7, hard cutoff → option B
+```
+
+---
+
+## §12 K=1 假设检验(2026-05-05)
+
+### 12.1 假设陈述
+
+跨 v1-v5 的诊断数据汇总后,multimodality 假设本身值得复检:
+
+- **delta head G1 cosine = 0.99 across all 5 versions** — delta-prediction 是单峰可学。K>1 对 delta 没有任何贡献。
+- **end head G1 cosine 高度不稳定**(0.21 / 0.80 / 0.86 / 0.80 / 0.29):v2 的"好"完全依赖 min-of-K hindsight 在 K=4 个 mode 里事后挑出最好那个。v5 移除这个 safety net(routing-weighted recon)后立即 collapse 到 0.29。
+- **LIBERO 指令是 deterministic single-goal**("把杯子放到 X"),非并列多解。multimodal goal 假设从数据域来看从未被强证明过。
+
+K=1 是对这个假设的干净检验:**single deterministic head per timescale,no routing,no mode balance,no repulsive loss**。如果 K=1 匹配或超过 v2 的 4/7 阈值,K>1 就是 over-engineering。
+
+### 12.2 §10.10 Hard Cutoff 的覆盖论证
+
+§10.10 Hard Cutoff("v5 ≤ 4/7 → 不再有 v6")是在 K=4 hparam exploration 框架内锁定的。**K=1 不是 v6 hparam tweak**,是对 K=4 设计的整体替代假设(architectural pivot,不是 hyperparameter pivot)。Cutoff 的 scope 是"K=4 family within hparam space",未涵盖"K family itself"。
+
+可类比:if v5 had been the last attempt within K=4,then exploring K=1 is a structurally separate question that v5's failure made testable for the first time。Cutoff 在 K=4 内的承诺仍然 hold(没有 v6 K=4 路线)。
+
+K=1 也有自己的 hard cutoff(§12.5):本次失败后**不再回探 K=2 / K=8 / Switch aux**,直接进 Stage B。
+
+### 12.3 K=1 设计
+
+| 项 | LCLGP K=4 (v1-v5) | LCLGP_K1 |
+|---|---|---|
+| Slot 参数 | `slot_end / slot_delta [K, N, D]` + `mode_emb_*` | `slot_end / slot_delta [N, D]` |
+| Forward | K mode outputs → min-of-K / soft routing / Gumbel routing | 单 head 直接输出 |
+| L_recon | min-of-K heteroscedastic NLL | 直接 heteroscedastic NLL `(L1/σ + β·logσ).mean()` |
+| L_ctr | InfoNCE on best-mode (argmin / router-chosen) z_g_end | InfoNCE on z_g_end(无 mode 选择) |
+| L_cf | Hinge on best-mode z_g_end vs z_g_end_cf | Hinge on z_g_end vs z_g_end_cf |
+| L_bal | KL(π_bar \|\| Uniform) — 4 个公式版本(v1-v5)| **删除** |
+| L_repulsive | cos² off-diag on K mode outputs | **删除** |
+| Router | softmin(v1-v4)/ explicit RoutingModule(v5) | **删除** |
+| 总损失 | 5 项加权 | 3 项加权(recon + ctr + cf) |
+| 参数量 | ~91M | ~91M(差异 <0.5M) |
+
+代码:`starVLA/model/framework/PlanVerify/lclgp_k1.py`(注册名 `LCLGP_K1`,~280 行新文件,从 lclgp.py 复用 `LCLGPDecoderLayer` + `_get`)。配置:`examples/PlanAndVerify/configs/lclgp_k1.yaml`。
+
+`predict_goal` 返回保留 K=1 dim(`z_g_end_all [B, 1, N, D]`、`log_sigma_end [B, 1]`、`best_mode_end [B]` all-zero),让现有诊断脚本几乎无修改通过。仅 D1-a pairwise cosine 在 `model.K == 1` 时短路写 N/A 行;D1-b 在 K=1 下也短路(单 mode 频率 trivially 1.0,non-informative)。
+
+### 12.4 6 阈值成功标准(替代 K=4 的 7 阈值)
+
+D1-a / D1-b / D1-d 在 K=1 下 N/A,从计分表移除。剩余 6 项:
+
+| # | Metric | Threshold | 期望理由 |
+|---|---|---|---|
+| 1 | G1_end_cos_mean | ≥ 0.75 | 单 mode 直接重建,无 min-of-K wrap;若假设成立应 ≥ 0.80 |
+| 2 | G1_delta_cos_mean | ≥ 0.75 | sanity(v1-v5 一致 ≥ 0.99) |
+| 3 | D1-c Pearson(σ, err) | ≥ 0.40 | σ 重新拿到直接 heteroscedastic L1 监督(无 router 干扰),应回 v2 的 +0.747 区 |
+| 4 | D2-a cf L1 | ≥ 0.05 | counterfactual 敏感度 — z_t 真的影响输出 |
+| 5 | D3-a end specialization gap | ≥ 0.05 | end vs delta 头特化(K-mode 解开后会更清晰) |
+| 6 | D3-a delta specialization gap | ≥ 0.05 | 同上 |
+
+### 12.5 决策树
+
+| K=1 通过率 | 动作 |
+|---|---|
+| ≥ 5/6 | 升级 `paper/tables/baseline_table.csv` = K=1;W3 收尾;Stage B 用 K=1 ckpt 当 plan-prior |
+| = 4/6(必含 #1 + #3)| multimodality unnecessary 假设确认;baseline = K=1;同上 |
+| ≤ 3/6 | multimodality necessary 反证;Stage B 用 v2 ckpt;K=1 进 paper §11 ablation |
+
+无 K=2 / K=8 / Switch aux 后续。这是 W3 最后一次 retrain。
+
+### 12.6 数据机回流命令
+
+```bash
+git pull origin pav-dev
+CONFIG_YAML=examples/PlanAndVerify/configs/lclgp_k1.yaml \
+RUN_ID=pav_w3_lclgp_k1 \
+bash examples/PlanAndVerify/train_files/run_lclgp.sh
+
+CKPT=playground/Checkpoints/pav_w3_lclgp_k1/final_model/pytorch_model.pt
+CFG=examples/PlanAndVerify/configs/lclgp_k1.yaml
+for cmd in g1 d1 d2 d3; do
+  .venv/bin/python examples/PlanAndVerify/scripts/run_diagnostics.py $cmd \
+    --config_yaml $CFG --checkpoint $CKPT --cuda --batch_size 16 --output_dir paper
+done
+```
+
+W&B 监测点(K=1 应该比 v5 干净得多):
+- `l_recon_end` 应平稳下降(无 v5-style chaos)
+- `sigma_end_mean` 应稳定在 [0.5, 2.0],不贴 floor 不贴 cap
+- `l_ctr` / `l_cf` 应平稳
+
+### 12.7 v5 → K=1 commit 链
+
+```
+e81d306 [PAV] feat: LCLGP v5 — explicit MoE routing (C1+C2+C3)
+772deee [PAV] fix: cast fp16 batch dtype at RoutingModule entry
+a47e3bc [PAV] data: LCLGP v5 retrain diagnostics — 1/7, hard cutoff → option B
+<下一 commit> [PAV] feat: LCLGP K=1 single-mode ablation (Hard Cutoff override)
 ```

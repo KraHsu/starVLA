@@ -536,6 +536,33 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
     - Stage B 起步用 v2 ckpt 当 plan-prior(下一步:Explore Stage B driver pipeline,出 plan)
   - **详见**:[docs/lclgp_diagnostics.md §11](docs/lclgp_diagnostics.md)
 
+- [ ] **T-W3.6.8** K=1 single-mode ablation(Hard Cutoff override — multimodality 假设检验)
+  - **缘起**:v1-v5 数据汇总后,multimodality 假设本身存疑 — delta head G1 = 0.99 跨所有版本(单峰),end head v2 的"好"完全依赖 min-of-K hindsight retro-pick(v5 移除后 collapse 到 0.29),LIBERO 指令是 deterministic single-goal。K=1 是干净检验。
+  - **§10.10 Cutoff 覆盖论证**:Cutoff scope = K=4 hparam exploration,K=1 是 architectural pivot(不同 hypothesis),不算 v6 hparam tweak;K=1 自带新 cutoff(§12.5)。
+  - **代码(commit 待 push)**:
+    - 新文件 `starVLA/model/framework/PlanVerify/lclgp_k1.py`(~280 行,注册名 `LCLGP_K1`)— 复用 `lclgp.py` 的 `LCLGPDecoderLayer` + `_get`;single slot stack per timescale(无 K dim)、无 mode_emb / router;3 损失 forward(`l_recon` 直接 heteroscedastic NLL、`l_ctr` InfoNCE on z_g_end / z_end、`l_cf` hinge);`predict_goal` 保留 K=1 dim shim
+    - 新配置 `examples/PlanAndVerify/configs/lclgp_k1.yaml`— 从 lclgp_v5.yaml 删去 `n_modes / use_router / gumbel_* / router_warmup_* / lambda_bal / lambda_rep / lambda_rep_warmup_steps / bal_temperature*` 8 个 K 相关字段
+    - `run_diagnostics.py` 增 K==1 短路 — D1-a pairwise cosine + D1-b min_mode_freq 写 N/A 行(避免 K=1 下 trivial false-positive pass);D1-d / D1-c / D2-a / D3-a 通过 `predict_goal` 的 K=1 dim shim 自动工作
+  - **CPU smoke 已过**:64/64 params 拿到 grad、4 head 全收非零 grad、`predict_goal` 形状全部正确(K=1 shim 保留)、fp16 batch path 通过、yaml 进 `build_framework` 输出 `LCLGPK1(K=1)` 91.47M 参数(与 v5 同量级)
+  - **6 阈值成功标准**(替代 K=4 的 7 阈值):G1_end_cos ≥ 0.75 / G1_delta_cos ≥ 0.75 / D1-c Pearson ≥ 0.40 / D2-a cf L1 ≥ 0.05 / D3-a end gap ≥ 0.05 / D3-a delta gap ≥ 0.05;详见 [docs/lclgp_diagnostics.md §12.4](docs/lclgp_diagnostics.md)
+  - **决策树**:≥ 5/6 → 升级 baseline = K=1;= 4/6(必含 #1+#3)→ baseline = K=1(假设确认);≤ 3/6 → 反证 multimodality 必要,Stage B 用 v2 ckpt,K=1 进 paper §11 ablation
+  - **数据机回流**:
+    ```bash
+    git pull origin pav-dev
+    CONFIG_YAML=examples/PlanAndVerify/configs/lclgp_k1.yaml \
+    RUN_ID=pav_w3_lclgp_k1 \
+    bash examples/PlanAndVerify/train_files/run_lclgp.sh
+    CKPT=playground/Checkpoints/pav_w3_lclgp_k1/final_model/pytorch_model.pt
+    CFG=examples/PlanAndVerify/configs/lclgp_k1.yaml
+    for cmd in g1 d1 d2 d3; do
+      .venv/bin/python examples/PlanAndVerify/scripts/run_diagnostics.py $cmd \
+        --config_yaml $CFG --checkpoint $CKPT --cuda --batch_size 16 --output_dir paper
+    done
+    ```
+  - **W&B 监测点**:`l_recon_end` 平稳下降(无 v5 chaos);`sigma_end_mean` 稳定 [0.5, 2.0](不贴 floor / cap);`l_ctr` / `l_cf` 平稳
+  - **无后续**:K=1 之后不再 K=2 / K=8 / Switch aux。这是 W3 最后一次 retrain。
+  - **详见**:[docs/lclgp_diagnostics.md §12](docs/lclgp_diagnostics.md)
+
 ---
 
 ## W4 — MSFV（5 d）

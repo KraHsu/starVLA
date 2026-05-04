@@ -1,0 +1,121 @@
+# LCLGP K=1 — single-mode deterministic ablation.
+#
+# v1-v5 (best 4/7 at v2, catastrophic 1/7 at v5) hit a ceiling on the K=4
+# multimodal design. Cross-version data revealed three signals that pointed
+# at the multimodality hypothesis itself:
+#   - delta head G1 cosine = 0.99 across all 5 versions (delta is unimodal)
+#   - end head G1 cosine unstable (0.21/0.80/0.86/0.80/0.29); v2's "good"
+#     relied on min-of-K hindsight retro-picking the best of 4 modes
+#   - LIBERO instructions are deterministic single-goal — multimodal goal
+#     hypothesis was never well-justified by the data domain
+#
+# K=1 is a clean test: single deterministic head per timescale, no routing,
+# no mode balance, no repulsive loss. If it matches/beats v2's 4/7 with much
+# less optimization complexity, K>1 was overengineered.
+#
+# This overrides §10.10 Hard Cutoff (which was scoped to K=4 hparam tuning,
+# not architectural pivots). 6-threshold success criterion (D1-a/D1-b/D1-d
+# dropped as N/A under K=1):
+#   #1 G1_end_cos_mean  ≥ 0.75
+#   #2 G1_delta_cos_mean ≥ 0.75
+#   #3 D1-c Pearson(σ, err) ≥ 0.40
+#   #4 D2-a cf L1 ≥ 0.05
+#   #5 D3-a end specialization gap ≥ 0.05
+#   #6 D3-a delta specialization gap ≥ 0.05
+#
+# Decision tree:
+#   ≥ 5/6 → upgrade baseline_table.csv = K=1; Stage B uses K=1 ckpt
+#   = 4/6 (with #1+#3 passing) → multimodality unnecessary; baseline = K=1
+#   ≤ 3/6 → multimodality necessary; revert to v2; K=1 → paper §11 ablation
+#
+# No K=2/K=8 follow-up. This is the last W3 retrain.
+# See docs/lclgp_diagnostics.md §12 for full design + cutoff override rationale.
+
+data:
+  lclgp_dataset:
+    output_dir: data/lclgp_dataset/pav_libero
+    index_train: data/lclgp_dataset/pav_libero/index_train.parquet
+    index_val:   data/lclgp_dataset/pav_libero/index_val.parquet
+    index_test:  data/lclgp_dataset/pav_libero/index_test.parquet
+    text_emb:    data/lclgp_dataset/pav_libero/text_emb.h5
+    latent_root: data/latents/pav_libero
+    view: primary
+
+  triplet:
+    samples_per_demo: 10
+    delta_steps: 50
+
+  text_encoder:
+    name: qwen3_vl_4b
+    path: playground/Pretrained_models/Qwen3-VL-4B-Instruct
+    hidden_size: 2560
+    dtype: bf16
+
+  vjepa:
+    n_tokens: 256
+    hidden_size: 1408
+
+  sampler:
+    n_tasks: 32
+    n_demos: 8
+    seed: 0
+
+framework:
+  name: LCLGP_K1
+  lclgp:
+    d_text: 2560
+    d_latent: 1408
+    d_hidden: 1024
+    n_heads: 16
+    n_layers: 4
+    n_tokens: 256
+    z_dropout: 0.1
+    attn_dropout: 0.1
+    mlp_ratio: 4.0
+    # NOTE: n_modes / use_router / gumbel_* / router_warmup_* dropped — K=1.
+
+    loss:
+      alpha: 0.5
+      beta: 0.5
+      lambda_ctr: 0.1
+      lambda_cf: 0.05
+      tau: 0.07
+      cf_margin: 0.05
+      log_sigma_min: -5.0
+      log_sigma_max: 1.5
+      # NOTE: lambda_bal / lambda_rep / lambda_rep_warmup_steps / bal_temperature*
+      # dropped — no mode balance, no mode repulsion under K=1.
+
+trainer:
+  max_train_steps: 4800
+  num_warmup_steps: 400
+  logging_frequency: 20
+  save_interval: 800
+  num_workers: 4
+
+  learning_rate:
+    base: 5.0e-4
+  lr_scheduler_type: cosine
+  scheduler_specific_kwargs: {}
+  optimizer:
+    betas: [0.9, 0.999]
+    weight_decay: 0.05
+    eps: 1.0e-8
+  gradient_clipping: 1.0
+
+  loss_scale:
+    vla: 1.0
+
+  save_format: pt
+  freeze_modules: ""
+  pretrained_checkpoint: null
+  reload_modules: null
+  is_resume: false
+
+seed: 0
+is_debug: false
+run_root_dir: ./playground/Checkpoints
+run_id: pav_w3_lclgp_k1
+output_dir: null
+wandb_project: pav-w3-lclgp
+wandb_entity: null
