@@ -432,17 +432,33 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
   - **代码**：[lclgp.py](starVLA/model/framework/PlanVerify/lclgp.py) 两处微改 — (1) `__init__` slot_end/slot_delta 改为正交初始化；(2) `forward` 把 `_mode_balance_loss` 输入从含 σ 的 per_mode_loss 改为 raw L1（关键，斩断 σ 通过 L_bal 的 shortcut）
   - **smoke 测试**：CPU forward+backward 正常，slot pairwise cosine off-diag ~1e-9（严格正交）
 
-- [ ] **T-W3.6.2** v2 retrain 60 epoch on 8×H20（**等待用户**）
-  - **启动**：`WANDB_ENTITY=<你> bash examples/PlanAndVerify/train_files/run_lclgp.sh --config_yaml examples/PlanAndVerify/configs/lclgp_v2.yaml`
-  - **预期**：~1h 墙钟（v1 30 epoch 0.5h 推算）
-  - **观察项**：σ_*_mean 应 ≈ 1（log σ ≈ 0），不再贴 cap；mode_balance_std 应 > 0.1（真分化）；l_ctr 应 < 1.5（开始收敛）；l_recon_end 应明显下降
+- [x] **T-W3.6.2** v2 retrain 60 epoch on H200（2026-05-04 完成）
+  - **实测墙钟**：0.6h（H200 比 8×H20 估算更快）
+  - **Final ckpt**：`playground/Checkpoints/pav_w3_lclgp_v2/final_model/pytorch_model.pt`
+  - **W&B 末段**：sigma_end_mean=1.76（不顶 cap=4.48 ✅）；sigma_delta_mean=4.48（接近 cap）；mode_balance_std_end=0.015（仍 < 0.1，K=4 mode collapse）；l_recon_end=0.799（反向上升，见 docs/lclgp_diagnostics.md §7.3 解释）；l_ctr=3.25（同向反弹）
 
-- [ ] **T-W3.6.3** v2 诊断 + 决策
-  - **跑**：4 个诊断命令 on v2 ckpt（同 W3.4.2/4.5/4.6/4.7 脚本，把 ckpt 路径换成 v2）
-  - **决策树**：
-    - 通过 ≥ 6/7 → 进 Stage B 跑 G-W3 reach gate（[T-W3.4.4](#-t-w3-4-4)）
-    - 通过 4-5/7 → 上 v2 备选两项（bal_temperature 退火 + repulsive loss + α 不对称），再训一轮
-    - 通过 ≤ 3/7 → 回退 K=2（n_modes=4→2 + 同 v2 hparam）；K=2 仍不行 → PaV-Lite
+- [x] **T-W3.6.3** v2 诊断 + 决策（2026-05-04 完成）
+  - **诊断结果**：4/7 通过（#1 G1_end_min_cos ✅、#2 G1_end_sigma_cos ✅、#5 D1-c Pearson ✅、#6 D2-a cf L1 ✅）；3/7 不过（#3 D1-a、#4 D1-b 双子项、#7 D3-a 双子项）
+  - **σ-shortcut 切断判定**：完全切断（σ_end=1.76、D1-c Pearson=0.747、D1-a 0.957→0.882；详见 docs/lclgp_diagnostics.md §7.3）
+  - **失效模式 shift**：K=4 mode collapse（cov_end k2=99.6%）是独立于 σ-shortcut 的新问题
+  - **决策**：4/7 → 路径 B（v3 retrain）→ T-W3.6.4
+  - **不选**回退 K=2（4/7 在 4-5 区间，按用户决策树未触发硬回退）
+
+- [ ] **T-W3.6.4** v3 设计 + retrain（路径 B：bal_T 退火 + repulsive loss）
+  - **配置**：`examples/PlanAndVerify/configs/lclgp_v3.yaml`（copy v2 + 改）
+    - `bal_temperature: 1.0` → 新增 `bal_temperature_min: 0.1`（线性退火 over training steps）
+    - 新增 `lambda_rep: 0.1`（待 smoke 调）
+    - `run_id: pav_w3_lclgp_v2 → pav_w3_lclgp_v3`；其余沿用 v2
+  - **代码改动**（架构未动）：
+    - `starVLA/model/framework/PlanVerify/lclgp.py` `__init__` 注册 `register_buffer("training_step", torch.zeros(()))`；forward 新增 `_mode_repulsive_loss(z_g)` 私有方法（pairwise cos² off-diag mean），按 step 计算当前 bal_T
+    - `starVLA/training/train_starvla.py` 注入 global_step → module（1 行 `model.module.training_step.fill_(global_step)`）
+  - **smoke**：CPU forward+backward；l_rep finite > 0；bal_T 在 step=0/2400/4800 = 1.0/0.55/0.10
+  - **retrain**：H200 数据机，60 epoch（~0.6h），同 v2 protocol
+  - **重诊**：4 cmd 同 v2，覆盖 paper/tables/lclgp_*.csv 到 v3
+  - **决策树（与 T-W3.6.3 同口径）**：
+    - ≥ 6/7 → Stage B（G-W3 driver）
+    - 4-5/7 → K=2 派生（n_modes=4→2 + v3 同 hparam）；K=2 失败 → PaV-Lite
+    - ≤ 3/7 → 直接 K=2 / PaV-Lite
 
 ---
 

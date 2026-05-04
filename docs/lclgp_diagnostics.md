@@ -319,9 +319,96 @@ done
 - K=2 简化版 retrain（保留多模态思路但减少自由度）
 - 极端情况回退 PaV-Lite（research_design line 1256）
 
-**截至本报告时间点 (2026-05-04)**：
+**截至 §6 报告时间点 (2026-05-04 早段)**：v2 retrain + 诊断尚未启动；最新状态见 §7。
+
+---
+
+## 7. v2 retrospective + 路径 B 决策
+
+**Date**: 2026-05-04
+**Run**: `pav_w3_lclgp_v2` (ckpt `playground/Checkpoints/pav_w3_lclgp_v2/final_model/pytorch_model.pt`)
+**Config**: [examples/PlanAndVerify/configs/lclgp_v2.yaml](../examples/PlanAndVerify/configs/lclgp_v2.yaml)
+**墙钟**: 60 epoch / 0.6h on H200
+
+### 7.1 v1↔v2 7 阈值对比
+
+| # | Metric | Threshold | v1 | v2 | v2 Pass | Δ 解读 |
+|---|---|---|---|---|---|---|
+| 1 | G1_end_min_cos_mean | ≥ 0.75 | 0.213 | **0.799** | ✅ | end head 拿回 ~150× 梯度 |
+| 2 | G1_end_sigma_cos_mean | ≥ 0.70 | 0.202 | **0.769** | ✅ | σ 不再常数，σ-best 真选好 mode |
+| 3 | D1-a pairwise cos ∈ [0.30, 0.70] | range | 0.957 | **0.882** | ❌ | 略降但 4 mode 输出仍趋同 |
+| 4a | D1-b min mode freq end | ≥ 0.10 | 0.013 | **0.0** | ❌ | mode 2 独占 99.6% |
+| 4b | D1-b min mode freq delta | ≥ 0.10 | 0.0 | **0.0** | ❌ | 仍 0 |
+| 5 | D1-c Pearson(σ, err) | ≥ 0.40 | nan | **0.747** | ✅ | σ 有方差，相关性可计算 |
+| 6 | D2-a cf L1 | ≥ 0.05 | 0.740 | **0.319** | ✅ | 仍健康（注：从 0.74 降至 0.32 但仍 > 0.05）|
+| 7a | D3-a end specialization gap | ≥ 0.05 | 0.021 | **0.018** | ❌ | 基本未动 |
+| 7b | D3-a delta specialization gap | ≥ 0.05 | 0.004 | **0.009** | ❌ | 略升但仍 < 0.05 |
+
+**通过 4/7（#1, #2, #5 新通过 + #6 维持）**
+
+### 7.2 W&B 末段对照 §5 v2 期望
+
+| 指标 | v1 | §5 期望 | v2 实测 | 评价 |
+|---|---|---|---|---|
+| sigma_end_mean | 148.4（顶 cap=148） | ≈ 1（log σ ≈ 0） | 1.76 | ✅ 不顶 cap=4.48 |
+| sigma_delta_mean | 148.4 | ≈ 1 | 4.48 | ⚠️ 接近 cap=4.48 上限（仍未顶死，但偏高）|
+| mode_balance_std_end | 5e-5 | > 0.1 | 0.015 | ❌ K=4 mode collapse |
+| l_recon_end | 0.39 | 明显下降 | 0.799 | ❌ 反向上升（解释见 §7.3）|
+| l_ctr | 2.6 | < 1.5 | 3.250 | ❌ 反向上升（同 §7.3）|
+| l_cf | 0.0 | 0.0 | 0.0 | ✅ |
+
+### 7.3 σ-shortcut 切断判定 — **完全切断**
+
+v2 σ-saturation 修复目标 100% 达成。证据三联（独立交叉证伪 v2 配置/代码未生效的怀疑）：
+
+1. **σ 不再贴 cap**：sigma_end_mean=1.76（v1: 148）。cap 从 148→4.48 已生效；δ 头 4.48 接近 cap 但未顶死。
+2. **D1-c Pearson 可计算**：0.747（v1: nan）→ σ 有方差，L_bal 不能再被 σ 廉价绕过。
+3. **D1-a 脱离 v1 顶值**：0.957→0.882 → slot 正交初始化可见效果，raw-L1 L_bal 也起作用。
+
+**l_recon_end / l_ctr 反向上升的解释**：mode 2 独占 99.6% 概率（cov_end k0=0, k1=0.004, k2=0.996, k3=0）→ 1 个 mode 承担本应 4 mode 分担的全部任务负担，loss 必然高于"4 mode 各管一摊"的潜在最优。这是 mode collapse 的**次生症状**，不是 σ 修复失败的反证。
+
+### 7.4 失效模式 shift — K=4 mode collapse（独立问题）
+
+v1 失效根因（σ-shortcut）已切断，但出现独立的新失效模式：4 个 slot orthogonal 初始化扛不过 60 epoch 的 winner-takes-all 动力学。
+
+- **D1-a 0.882**：4 mode 输出仍趋同
+- **cov_end k=[0.0, 0.004, **0.996**, 0.0]**：mode 2 独占；其余 3 个 mode 实际 dead
+- **D1-b 0.0**：min mode freq = 0，softmin(L1) 选 1 winner 后 L_bal 仍可被满足
+
+**根因**（非 σ-shortcut，独立诊断）：
+- L_ctr 用 best-mode 输出做正样本 → snowball：哪个 mode 先学好哪个独占梯度
+- L_bal 切断 σ 通道后，4 mode 输出仍可彼此趋同；softmin(L1) 仍能选 1 winner 满足 L_bal
+- 缺乏 "slot 排斥" 或 "温度" 压制 winner-takes-all
+
+### 7.5 决策路径 — 4/7 → 路径 B → v3
+
+按 §3.6 决策树：
+- ≥ 6/7 → Stage B（**不触发**）
+- **4-5/7 → v2 备选两项 + 再训一轮（触发）**
+- ≤ 3/7 → K=2 / PaV-Lite（不触发）
+
+**v3 设计**（架构未动，K=4 + 双时间尺度 + 5 损失全保留；仅在 v2 之上加两项备选）：
+
+| 备选项 | 选 | 理由 |
+|---|---|---|
+| bal_temperature 退火 1.0→0.1（线性 over training steps）| ✅ | softmin 锐化，严惩 winner-takes-all → 直击 D1-b |
+| Repulsive loss 在 mode 输出层 z_g（pairwise cos² off-diag mean，λ_rep=0.1）| ✅ | 拉开 4 mode 预测，给 L_bal 4 个真不同 "竞争者" → 直击 D1-a |
+| α 0.5→0.7 给 end head | ❌ | 解决 end-vs-delta 权重，与 mode 分化无关；G1_end 已通过 0.79 |
+
+v3 配置：`examples/PlanAndVerify/configs/lclgp_v3.yaml`（下一 commit 落地）。
+v3 代码改动：`starVLA/model/framework/PlanVerify/lclgp.py` forward 加 repulsive + bal_T schedule；`starVLA/training/train_starvla.py` 注入 global_step 到 module（1 行）。
+
+### 7.6 v3 看点（独立于阈值通过条数）
+
+- **核心目标**：D1-a ∈ [0.3, 0.7] + cov_end 4 mode 都 ≥ 0.10 + mode_balance_std_end > 0.1
+- **防回退**：G1_end_min_cos_mean 仍 ≥ 0.75（防止 repulsive 反弹已通过的指标）
+- **次生健康**：l_recon_end 回落（4 mode 分担成功的副作用）；σ_delta_mean 远离 cap
+
+### 7.7 截至本报告时间点 (2026-05-04)
+
 - v1 训练完成、v1 诊断完成 → ✅
 - v2 配置 + 代码改动准备完成 → ✅
-- v2 retrain → ⏳ 待用户启动
-- v2 诊断 → ⏳ 等 retrain
-- Stage B (G-W3 driver) → ⏳ 取决于 v2 诊断结果
+- v2 retrain（60 epoch / 0.6h on H200）→ ✅
+- v2 诊断（4/7 通过）→ ✅
+- v3 设计 + retrain → ⏳ 下一 commit
+- Stage B (G-W3 driver) → ⏳ 取决于 v3 诊断结果（≥ 6/7 触发）

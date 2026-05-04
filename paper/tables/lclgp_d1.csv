@@ -1,9 +1,9 @@
 metric,value,threshold_low,threshold_high,pass
-D1a_mean_pairwise_cos,0.957211434841156,0.3,0.7,False
-D1b_min_mode_freq_end,0.012804877944290638,0.1,,False
+D1a_mean_pairwise_cos,0.8823456764221191,0.3,0.7,False
+D1b_min_mode_freq_end,0.0,0.1,,False
 D1b_min_mode_freq_delta,0.0,0.1,,False
-D1c_pearson_sigma_err,nan,0.4,,False
-D1b_cov_end_k0,0.16585366427898407,,,
-D1b_cov_end_k1,0.012804877944290638,,,
-D1b_cov_end_k2,0.06341463327407837,,,
-D1b_cov_end_k3,0.7579268217086792,,,
+D1c_pearson_sigma_err,0.7466674709885296,0.4,,True
+D1b_cov_end_k0,0.0,,,
+D1b_cov_end_k1,0.004268292803317308,,,
+D1b_cov_end_k2,0.9957317113876343,,,
+D1b_cov_end_k3,0.0,,,
