@@ -141,8 +141,16 @@ class LCLGP(baseframework):
         self.bal_temperature_min = float(
             _get(config, "framework", "lclgp", "loss", "bal_temperature_min", default=self.bal_temperature)
         )
-        # Mode-output repulsive loss weight (W3 v3 path B). lambda_rep=0 → no-op.
+        # Mode-output repulsive loss peak weight (W3 v3 path B). lambda_rep=0 → no-op.
         self.lambda_rep = float(_get(config, "framework", "lclgp", "loss", "lambda_rep", default=0.0))
+        # λ_rep warmup (W3 v4): off for first ``lambda_rep_warmup_steps``, then linear
+        # ramp 0 → ``lambda_rep`` over (total_steps − warmup). Default 0 = constant
+        # ``lambda_rep`` for the whole run, preserving v3 behavior. v3's instant-on
+        # λ_rep=0.1 decalibrated the σ-head (D1-c Pearson sign flipped, see §8);
+        # delaying the turn-on lets σ stabilize before repulsion competes for backbone.
+        self.lambda_rep_warmup_steps = int(
+            _get(config, "framework", "lclgp", "loss", "lambda_rep_warmup_steps", default=0)
+        )
         # Schedule horizon for bal_T anneal — read from trainer.max_train_steps.
         self.total_steps_for_schedule = int(_get(config, "trainer", "max_train_steps", default=4800))
         # Step counter updated externally by the trainer each accelerator step.
@@ -384,12 +392,24 @@ class LCLGP(baseframework):
         l_bal_delta, pi_bar_delta, mb_std_delta = self._mode_balance_loss(l1_delta_per_mode, bal_T=current_bal_T)
 
         # Mode-output repulsive loss (W3 v3 path B). lambda_rep=0 → no-op (v1/v2 behavior).
+        # λ_rep warmup schedule (W3 v4): when lambda_rep_warmup_steps > 0, the effective
+        # weight is 0 for step < warmup_steps, then linearly ramps to ``lambda_rep`` by
+        # ``total_steps_for_schedule``. Always log the *would-be* l_rep terms so we can
+        # diagnose the warmup transition in W&B even before they contribute to total.
         if self.lambda_rep > 0.0:
             l_rep_end = self._mode_repulsive_loss(z_g_end)
             l_rep_delta = self._mode_repulsive_loss(z_g_delta)
+            if self.lambda_rep_warmup_steps > 0:
+                _step_f = self.training_step.float()
+                _ramp_total = max(1, self.total_steps_for_schedule - self.lambda_rep_warmup_steps)
+                _ramp_progress = ((_step_f - self.lambda_rep_warmup_steps) / _ramp_total).clamp(0.0, 1.0)
+                current_lambda_rep = self.lambda_rep * _ramp_progress
+            else:
+                current_lambda_rep = z_g_end.new_tensor(self.lambda_rep)
         else:
             l_rep_end = z_g_end.new_zeros(())
             l_rep_delta = z_g_end.new_zeros(())
+            current_lambda_rep = z_g_end.new_zeros(())
 
         # InfoNCE across tasks (uses end-goal best mode vs ground-truth z_end).
         l_ctr = self._info_nce_loss(z_g_end, argmin_end, z_end, gather_fn=gather_fn)
@@ -404,7 +424,7 @@ class LCLGP(baseframework):
             + self.lambda_bal * (l_bal_end + l_bal_delta)
             + self.lambda_ctr * l_ctr
             + self.lambda_cf * l_cf
-            + self.lambda_rep * (l_rep_end + l_rep_delta) / 2.0
+            + current_lambda_rep * (l_rep_end + l_rep_delta) / 2.0
         )
 
         return {
@@ -418,6 +438,7 @@ class LCLGP(baseframework):
             "l_rep_end": l_rep_end.detach(),
             "l_rep_delta": l_rep_delta.detach(),
             "bal_temperature_current": current_bal_T.detach(),
+            "lambda_rep_current": current_lambda_rep.detach(),
             "sigma_end_mean": log_s_end.exp().mean().detach(),
             "sigma_delta_mean": log_s_delta.exp().mean().detach(),
             "mode_balance_std_end": mb_std_end,
