@@ -134,6 +134,20 @@ class LCLGP(baseframework):
         self.log_sigma_max = float(_get(config, "framework", "lclgp", "loss", "log_sigma_max", default=5.0))
         # Soft mode-balance temperature (KL needs differentiable assignment).
         self.bal_temperature = float(_get(config, "framework", "lclgp", "loss", "bal_temperature", default=1.0))
+        # bal_temperature linear anneal (W3 v3 path B): bal_T schedules from
+        # ``bal_temperature`` → ``bal_temperature_min`` over training. Sharper softmin
+        # punishes winner-takes-all routing → directly attacks D1-b min-mode-freq=0.
+        # Default = bal_temperature (no anneal) preserves v1/v2 behavior.
+        self.bal_temperature_min = float(
+            _get(config, "framework", "lclgp", "loss", "bal_temperature_min", default=self.bal_temperature)
+        )
+        # Mode-output repulsive loss weight (W3 v3 path B). lambda_rep=0 → no-op.
+        self.lambda_rep = float(_get(config, "framework", "lclgp", "loss", "lambda_rep", default=0.0))
+        # Schedule horizon for bal_T anneal — read from trainer.max_train_steps.
+        self.total_steps_for_schedule = int(_get(config, "trainer", "max_train_steps", default=4800))
+        # Step counter updated externally by the trainer each accelerator step.
+        # Non-persistent (resume reloads completed_steps and re-fills, no need to checkpoint).
+        self.register_buffer("training_step", torch.zeros((), dtype=torch.long), persistent=False)
 
         # --- Modules --------------------------------------------------------
         self.text_proj = nn.Linear(self.d_text, self.d_hidden)
@@ -242,18 +256,38 @@ class LCLGP(baseframework):
         best, argmin = per_mode.min(dim=-1)                                   # [B], [B]
         return best.mean(), argmin, per_mode
 
-    def _mode_balance_loss(self, per_mode_loss: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _mode_balance_loss(
+        self, per_mode_loss: torch.Tensor, bal_T: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Soft-assignment KL(pi_bar || Uniform(K)).
 
         Hard ``argmin`` has no gradient, so we use a softmin over per-mode losses
-        (temperature ``bal_temperature``) to get a differentiable assignment.
-        Returns (loss, soft_pi_bar, mode_balance_std) with detached diagnostics.
+        (temperature ``bal_T`` — passed by caller for v3 anneal, falls back to the
+        static ``self.bal_temperature``) to get a differentiable assignment.
+        Returns (loss, soft_pi_bar, mode_balance_std).
         """
-        soft = F.softmin(per_mode_loss / self.bal_temperature, dim=-1)        # [B, K]
+        T = bal_T if bal_T is not None else self.bal_temperature
+        soft = F.softmin(per_mode_loss / T, dim=-1)                           # [B, K]
         pi_bar = soft.mean(dim=0)                                              # [K]
         uniform = 1.0 / self.K
         kl = (pi_bar * ((pi_bar + 1e-8) / uniform).log()).sum()
         return kl, pi_bar.detach(), pi_bar.detach().std()
+
+    def _mode_repulsive_loss(self, z_g: torch.Tensor) -> torch.Tensor:
+        """Pairwise mode-output repulsion (W3 v3 path B).
+
+        Mean-pool tokens → L2-normalize in fp32 → pairwise cos². Off-diagonal mean
+        across the K×K mode pairs, averaged over the batch. With orthogonal modes
+        the loss is 0; the further modes converge, the larger the penalty. Targets
+        D1-a (modes too similar) and gives L_bal a true K-way competition. See
+        docs/lclgp_diagnostics.md §7.5.
+        """
+        z_pool = z_g.mean(dim=-2).float()                                      # [B, K, D]
+        z_norm = F.normalize(z_pool, dim=-1)                                   # [B, K, D]
+        sim = z_norm @ z_norm.transpose(-1, -2)                                # [B, K, K]
+        K = sim.shape[-1]
+        mask = ~torch.eye(K, dtype=torch.bool, device=sim.device)              # [K, K]
+        return sim.pow(2).masked_select(mask.unsqueeze(0).expand_as(sim)).mean()
 
     def _info_nce_loss(
         self,
@@ -341,8 +375,21 @@ class LCLGP(baseframework):
         # See docs/lclgp_diagnostics.md (W3 v1 root cause).
         l1_end_per_mode = (z_g_end - z_end.detach().unsqueeze(1)).abs().mean(dim=(-2, -1))
         l1_delta_per_mode = (z_g_delta - z_delta.detach().unsqueeze(1)).abs().mean(dim=(-2, -1))
-        l_bal_end, pi_bar_end, mb_std_end = self._mode_balance_loss(l1_end_per_mode)
-        l_bal_delta, pi_bar_delta, mb_std_delta = self._mode_balance_loss(l1_delta_per_mode)
+        # bal_T linear anneal (W3 v3 path B): T(step) = T_init - (T_init - T_min) * progress.
+        # progress=0 at step 0 → T_init; progress=1 at total_steps → T_min. With
+        # bal_temperature_min == bal_temperature (default) this collapses to the v2 static T.
+        progress = (self.training_step.float() / max(1, self.total_steps_for_schedule)).clamp(0.0, 1.0)
+        current_bal_T = self.bal_temperature - (self.bal_temperature - self.bal_temperature_min) * progress
+        l_bal_end, pi_bar_end, mb_std_end = self._mode_balance_loss(l1_end_per_mode, bal_T=current_bal_T)
+        l_bal_delta, pi_bar_delta, mb_std_delta = self._mode_balance_loss(l1_delta_per_mode, bal_T=current_bal_T)
+
+        # Mode-output repulsive loss (W3 v3 path B). lambda_rep=0 → no-op (v1/v2 behavior).
+        if self.lambda_rep > 0.0:
+            l_rep_end = self._mode_repulsive_loss(z_g_end)
+            l_rep_delta = self._mode_repulsive_loss(z_g_delta)
+        else:
+            l_rep_end = z_g_end.new_zeros(())
+            l_rep_delta = z_g_end.new_zeros(())
 
         # InfoNCE across tasks (uses end-goal best mode vs ground-truth z_end).
         l_ctr = self._info_nce_loss(z_g_end, argmin_end, z_end, gather_fn=gather_fn)
@@ -357,6 +404,7 @@ class LCLGP(baseframework):
             + self.lambda_bal * (l_bal_end + l_bal_delta)
             + self.lambda_ctr * l_ctr
             + self.lambda_cf * l_cf
+            + self.lambda_rep * (l_rep_end + l_rep_delta) / 2.0
         )
 
         return {
@@ -367,6 +415,9 @@ class LCLGP(baseframework):
             "l_bal_delta": l_bal_delta.detach(),
             "l_ctr": l_ctr.detach(),
             "l_cf": l_cf.detach(),
+            "l_rep_end": l_rep_end.detach(),
+            "l_rep_delta": l_rep_delta.detach(),
+            "bal_temperature_current": current_bal_T.detach(),
             "sigma_end_mean": log_s_end.exp().mean().detach(),
             "sigma_delta_mean": log_s_delta.exp().mean().detach(),
             "mode_balance_std_end": mb_std_end,

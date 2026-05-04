@@ -307,6 +307,13 @@ class VLATrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 progress_bar.update(1)
                 self.completed_steps += 1
+                # Some frameworks (e.g. LCLGP v3 path B) read a step counter buffer
+                # for hyperparameter schedules (bal_temperature anneal). No-op for
+                # frameworks without the buffer.
+                _unwrapped = self.accelerator.unwrap_model(self.model)
+                _ts = getattr(_unwrapped, "training_step", None)
+                if isinstance(_ts, torch.Tensor):
+                    _ts.fill_(self.completed_steps)
 
             if self.accelerator.is_local_main_process:
                 progress_bar.set_postfix(

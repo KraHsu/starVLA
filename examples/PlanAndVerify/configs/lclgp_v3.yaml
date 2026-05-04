@@ -1,0 +1,114 @@
+# LCLGP v3 — path B (v2 备选两项): bal_temperature anneal + mode repulsive.
+#
+# v2 σ-saturation fix landed but failure mode shifted to K=4 mode collapse
+# (cov_end k2=99.6%, D1-a=0.882, D1-b=0). 4/7 thresholds passed → trigger
+# path B per docs/lclgp_diagnostics.md §7.5.
+#
+# Diff from v2:
+#   - bal_temperature_min: 0.1 (NEW)   # linear anneal 1.0 → 0.1 over training
+#   - lambda_rep:          0.1 (NEW)   # mode-output pairwise cos² off-diag
+#   - run_id: pav_w3_lclgp_v2 → pav_w3_lclgp_v3
+#
+# Code-side changes accompanying this config (lclgp.py):
+#   - __init__: register_buffer("training_step"), read bal_temperature_min,
+#     lambda_rep, total_steps_for_schedule
+#   - forward: compute current bal_T from training_step, pass to
+#     _mode_balance_loss; add _mode_repulsive_loss(z_g) on mode-output level
+#     (mean-pool tokens → L2-norm → pairwise cos² off-diag mean)
+#   - train_starvla.py: fill_ training_step buffer per accelerator step
+#
+# α=0.5 NOT changed (third v2 备选项 not selected — α tunes end-vs-delta
+# weight, unrelated to mode diversity; G1_end already passes at 0.79).
+#
+# Architecture / data / 5-loss core / σ cap / β / λ_bal unchanged from v2.
+
+data:
+  lclgp_dataset:
+    output_dir: data/lclgp_dataset/pav_libero
+    index_train: data/lclgp_dataset/pav_libero/index_train.parquet
+    index_val:   data/lclgp_dataset/pav_libero/index_val.parquet
+    index_test:  data/lclgp_dataset/pav_libero/index_test.parquet
+    text_emb:    data/lclgp_dataset/pav_libero/text_emb.h5
+    latent_root: data/latents/pav_libero
+    view: primary
+
+  triplet:
+    samples_per_demo: 10
+    delta_steps: 50
+
+  text_encoder:
+    name: qwen3_vl_4b
+    path: playground/Pretrained_models/Qwen3-VL-4B-Instruct
+    hidden_size: 2560
+    dtype: bf16
+
+  vjepa:
+    n_tokens: 256
+    hidden_size: 1408
+
+  sampler:
+    n_tasks: 32
+    n_demos: 8
+    seed: 0
+
+framework:
+  name: LCLGP
+  lclgp:
+    d_text: 2560
+    d_latent: 1408
+    d_hidden: 1024
+    n_heads: 16
+    n_layers: 4
+    n_modes: 4
+    n_tokens: 256
+    z_dropout: 0.1
+    attn_dropout: 0.1
+    mlp_ratio: 4.0
+
+    loss:
+      alpha: 0.5
+      beta: 0.5
+      lambda_bal: 0.3
+      lambda_ctr: 0.1
+      lambda_cf: 0.05
+      lambda_rep: 0.1           # v2: 0.0 (default) — pairwise cos² off-diag, on mode outputs
+      tau: 0.07
+      cf_margin: 0.05
+      log_sigma_min: -5.0
+      log_sigma_max: 1.5
+      bal_temperature: 1.0      # init T at step 0
+      bal_temperature_min: 0.1  # v2: equal to bal_temperature (no anneal) — linear 1.0 → 0.1
+
+trainer:
+  max_train_steps: 4800
+  num_warmup_steps: 400
+  logging_frequency: 20
+  save_interval: 800
+  num_workers: 4
+
+  learning_rate:
+    base: 5.0e-4
+  lr_scheduler_type: cosine
+  scheduler_specific_kwargs: {}
+  optimizer:
+    betas: [0.9, 0.999]
+    weight_decay: 0.05
+    eps: 1.0e-8
+  gradient_clipping: 1.0
+
+  loss_scale:
+    vla: 1.0
+
+  save_format: pt
+  freeze_modules: ""
+  pretrained_checkpoint: null
+  reload_modules: null
+  is_resume: false
+
+seed: 0
+is_debug: false
+run_root_dir: ./playground/Checkpoints
+run_id: pav_w3_lclgp_v3
+output_dir: null
+wandb_project: pav-w3-lclgp
+wandb_entity: null
