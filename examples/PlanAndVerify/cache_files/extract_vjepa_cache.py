@@ -59,6 +59,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", default="bf16", choices=("bf16", "fp16", "fp32"))
+    parser.add_argument(
+        "--max_gpu_memory_gb",
+        type=float,
+        default=None,
+        help="Optional per-process CUDA allocator cap in GiB. Example: 100 limits each shard process to about 100 GiB.",
+    )
     parser.add_argument("--save_tokens", action="store_true")
     parser.add_argument("--num_tokens", type=int, default=4)
     parser.add_argument("--overwrite", action="store_true")
@@ -83,6 +89,30 @@ def resolve_torch_dtype(dtype_name: str, device: torch.device) -> tuple[torch.dt
         )
         return torch.float32, "fp32"
     return requested, dtype_name
+
+
+def memory_fraction_from_gib(max_memory_gib: float, total_memory_bytes: int) -> float:
+    if max_memory_gib <= 0:
+        raise ValueError(f"max_gpu_memory_gb must be positive, got {max_memory_gib}")
+    total_memory_gib = total_memory_bytes / (1024**3)
+    return min(max_memory_gib / total_memory_gib, 1.0)
+
+
+def configure_cuda_memory_cap(device: torch.device, max_memory_gib: float | None) -> None:
+    if max_memory_gib is None:
+        return
+    if device.type != "cuda":
+        print(f"[warn] --max_gpu_memory_gb is ignored for non-CUDA device {device}", file=sys.stderr)
+        return
+
+    properties = torch.cuda.get_device_properties(device)
+    fraction = memory_fraction_from_gib(max_memory_gib, properties.total_memory)
+    torch.cuda.set_per_process_memory_fraction(fraction, device=device)
+    effective_gib = fraction * properties.total_memory / (1024**3)
+    print(
+        f"==> CUDA allocator cap for {device}: {effective_gib:.1f} GiB "
+        f"({fraction:.3f} of {properties.total_memory / (1024**3):.1f} GiB)"
+    )
 
 
 def strip_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -419,6 +449,9 @@ def extract_cache(args: argparse.Namespace) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "episodes").mkdir(parents=True, exist_ok=True)
 
+    device = torch.device(args.device)
+    configure_cuda_memory_cap(device, args.max_gpu_memory_gb)
+
     cfg, data_cfg, underlying_dataset_name, _robot_type, dataset = build_single_dataset(
         args.config_yaml,
         args.dataset_name,
@@ -426,7 +459,6 @@ def extract_cache(args: argparse.Namespace) -> int:
         args.num_history_frames,
     )
 
-    device = torch.device(args.device)
     model_dtype, actual_dtype_name = resolve_torch_dtype(args.dtype, device)
     encoder = load_vjepa_encoder(
         ckpt_path=args.vjepa_ckpt,

@@ -8,9 +8,10 @@ NUM_HISTORY_FRAMES="${4:-8}"
 BATCH_SIZE="${5:-8}"
 NUM_WORKERS="${6:-4}"
 DTYPE="${7:-bf16}"
+MAX_GPU_MEMORY_GB="${8:-100}"
 
 if [[ -z "${CKPT_PATH}" ]]; then
-  echo "Usage: $0 [CONFIG_YAML] CKPT_PATH [OUT_DIR] [NUM_HISTORY_FRAMES] [BATCH_SIZE] [NUM_WORKERS] [DTYPE]" >&2
+  echo "Usage: $0 [CONFIG_YAML] CKPT_PATH [OUT_DIR] [NUM_HISTORY_FRAMES] [BATCH_SIZE] [NUM_WORKERS] [DTYPE] [MAX_GPU_MEMORY_GB]" >&2
   echo "Example:" >&2
   echo "  $0 examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml ./playground/Pretrained_models/vjepa2_vitg/vjepa2_1_vitb_dist_vitG_384.pt" >&2
   exit 1
@@ -28,6 +29,7 @@ echo "    N:      ${NUM_HISTORY_FRAMES}"
 echo "    batch:  ${BATCH_SIZE}"
 echo "    workers:${NUM_WORKERS}"
 echo "    dtype:  ${DTYPE}"
+echo "    max GPU memory/process: ${MAX_GPU_MEMORY_GB} GiB"
 echo "    logs:   ${LOG_DIR}"
 
 pids=()
@@ -46,6 +48,7 @@ for SHARD_ID in $(seq 0 7); do
       --num_workers "${NUM_WORKERS}" \
       --device cuda:0 \
       --dtype "${DTYPE}" \
+      --max_gpu_memory_gb "${MAX_GPU_MEMORY_GB}" \
       >"${LOG_FILE}" 2>&1 &
   pids+=("$!")
 done

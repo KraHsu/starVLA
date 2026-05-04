@@ -10,13 +10,16 @@ SHARD_ID="${6:-0}"
 BATCH_SIZE="${7:-8}"
 NUM_WORKERS="${8:-4}"
 DEVICE="${9:-cuda:0}"
+DTYPE="${10:-bf16}"
+MAX_GPU_MEMORY_GB="${11:-}"
 
 if [[ -z "${CKPT_PATH}" ]]; then
-  echo "Usage: $0 [CONFIG_YAML] CKPT_PATH [OUT_DIR] [NUM_HISTORY_FRAMES] [NUM_SHARDS] [SHARD_ID] [BATCH_SIZE] [NUM_WORKERS] [DEVICE]" >&2
+  echo "Usage: $0 [CONFIG_YAML] CKPT_PATH [OUT_DIR] [NUM_HISTORY_FRAMES] [NUM_SHARDS] [SHARD_ID] [BATCH_SIZE] [NUM_WORKERS] [DEVICE] [DTYPE] [MAX_GPU_MEMORY_GB]" >&2
   exit 1
 fi
 
-.venv/bin/python examples/PlanAndVerify/cache_files/extract_vjepa_cache.py \
+CMD=(
+  .venv/bin/python examples/PlanAndVerify/cache_files/extract_vjepa_cache.py
   --config_yaml "${CONFIG_YAML}" \
   --dataset_name libero_goal \
   --camera_key video.primary_image \
@@ -27,4 +30,12 @@ fi
   --num_workers "${NUM_WORKERS}" \
   --num_shards "${NUM_SHARDS}" \
   --shard_id "${SHARD_ID}" \
-  --device "${DEVICE}"
+  --device "${DEVICE}" \
+  --dtype "${DTYPE}"
+)
+
+if [[ -n "${MAX_GPU_MEMORY_GB}" ]]; then
+  CMD+=(--max_gpu_memory_gb "${MAX_GPU_MEMORY_GB}")
+fi
+
+"${CMD[@]}"

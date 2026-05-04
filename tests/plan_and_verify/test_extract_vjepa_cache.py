@@ -6,6 +6,7 @@ import torch
 from examples.PlanAndVerify.cache_files.extract_vjepa_cache import (
     build_index,
     iter_sharded_episodes,
+    memory_fraction_from_gib,
     patch_vjepa2_1_rope_dtype,
     save_episode_cache,
 )
@@ -64,3 +65,8 @@ def test_vjepa_rope_patch_preserves_input_dtype():
     out = vjepa_modules.rotate_queries_or_keys(x, pos=pos, n_registers=0, has_cls_first=False)
 
     assert out.dtype == torch.bfloat16
+
+
+def test_memory_fraction_from_gib_caps_at_one():
+    assert memory_fraction_from_gib(100, 120 * 1024**3) == 100 / 120
+    assert memory_fraction_from_gib(100, 80 * 1024**3) == 1.0
