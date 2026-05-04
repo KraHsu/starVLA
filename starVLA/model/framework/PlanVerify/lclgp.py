@@ -139,8 +139,16 @@ class LCLGP(baseframework):
         self.text_proj = nn.Linear(self.d_text, self.d_hidden)
         self.latent_proj = nn.Linear(self.d_latent, self.d_hidden)
 
-        self.slot_end = nn.Parameter(torch.randn(self.K, self.n_tokens, self.d_hidden) * 0.02)
-        self.slot_delta = nn.Parameter(torch.randn(self.K, self.n_tokens, self.d_hidden) * 0.02)
+        # Slot tokens: orthogonal init across modes so the K candidates start
+        # in distinct directions in parameter space. Without this, mode-balance
+        # routing snowballs to whichever mode wins early — see W3 v1 retrospective
+        # in docs/lclgp_diagnostics.md (cov_end_k3=0.76 mode collapse).
+        slot_end_init = torch.empty(self.K, self.n_tokens, self.d_hidden)
+        slot_delta_init = torch.empty(self.K, self.n_tokens, self.d_hidden)
+        nn.init.orthogonal_(slot_end_init.view(self.K, -1))
+        nn.init.orthogonal_(slot_delta_init.view(self.K, -1))
+        self.slot_end = nn.Parameter(slot_end_init * 0.02)
+        self.slot_delta = nn.Parameter(slot_delta_init * 0.02)
         self.mode_emb_end = nn.Parameter(torch.randn(self.K, 1, self.d_hidden) * 0.02)
         self.mode_emb_delta = nn.Parameter(torch.randn(self.K, 1, self.d_hidden) * 0.02)
         self.tau_end = nn.Parameter(torch.zeros(1))  # learnable timescale separator (additive)
@@ -325,9 +333,16 @@ class LCLGP(baseframework):
         l_recon_end, argmin_end, per_mode_end = self._recon_loss(z_g_end, z_end, log_s_end)
         l_recon_delta, argmin_delta, per_mode_delta = self._recon_loss(z_g_delta, z_delta, log_s_delta)
 
-        # Mode balance (soft KL).
-        l_bal_end, pi_bar_end, mb_std_end = self._mode_balance_loss(per_mode_end)
-        l_bal_delta, pi_bar_delta, mb_std_delta = self._mode_balance_loss(per_mode_delta)
+        # Mode balance (soft KL) — feed RAW L1, not the σ-divided per_mode_loss.
+        # Rationale: per_mode_loss contains 1/σ + β·log σ. With σ saturated at
+        # log_sigma_max, all modes have identical per_mode_loss → softmin uniform
+        # → KL=0 trivially, so mode collapse is left unchecked. Raw L1 cannot be
+        # equalized this way; routing reflects actual reconstruction quality.
+        # See docs/lclgp_diagnostics.md (W3 v1 root cause).
+        l1_end_per_mode = (z_g_end - z_end.detach().unsqueeze(1)).abs().mean(dim=(-2, -1))
+        l1_delta_per_mode = (z_g_delta - z_delta.detach().unsqueeze(1)).abs().mean(dim=(-2, -1))
+        l_bal_end, pi_bar_end, mb_std_end = self._mode_balance_loss(l1_end_per_mode)
+        l_bal_delta, pi_bar_delta, mb_std_delta = self._mode_balance_loss(l1_delta_per_mode)
 
         # InfoNCE across tasks (uses end-goal best mode vs ground-truth z_end).
         l_ctr = self._info_nce_loss(z_g_end, argmin_end, z_end, gather_fn=gather_fn)

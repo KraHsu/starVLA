@@ -311,7 +311,9 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
 
 ## W3 — LCLGP 模块 [🚧 G-W3]（7 d）
 
-> **W3 落地状态（commits）**：模型 + 损失 `dfd393f` ｜ trainer + DDP sampler + 诊断 `bf32a60` ｜ Bridge-v2 转换驱动 `d6dd74a` ｜ vjepa2 sdp_kernel warning fix `03d6664`. 主线代码全部就绪；卡在 T-W2.2.3 全量抽取 + T-W3.3.4 30-epoch 训练（用户跑），跑完后再做 W3.4 诊断 + G-W3 gate。
+> **W3 落地状态（commits）**：模型 + 损失 `dfd393f` ｜ trainer + DDP sampler + 诊断 `bf32a60` ｜ Bridge-v2 转换驱动 `d6dd74a` ｜ vjepa2 sdp_kernel warning fix `03d6664`.
+>
+> **v1 retrospective (2026-05-04)**：30 epoch 训练完成（user）+ 4/4 诊断已跑（user 数据机）→ **1/7 阈值通过**。失败集中在 σ saturation（log σ 顶到 cap=5.0）+ mode collapse (k=3 拿 76% 路由) + end head 未学习。详见 [docs/lclgp_diagnostics.md](docs/lclgp_diagnostics.md)。**Gate decision = 不直接跑 G-W3，先做 v2 retrain 修 σ saturation 单一根因（保持原设计）**，详见 §3.6。
 
 ### 3.1 模型实现
 
@@ -371,12 +373,10 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
   - **真实数据 1-epoch quick run 待跑**（全量 latent 抽取完成后）；预计 ~80 step/epoch，bs=256，1×H20 ≈ 7-10 min
   - **观察项**：`sigma_delta_mean = 148 = exp(5)` 触上限 — 如果 30-epoch 训练 epoch 5 后还黏在 5，把 `framework.lclgp.loss.log_sigma_max` 调到 2.0 重训
 
-- [ ] **T-W3.3.4** 30 epoch full run on 8×H20（**等待用户**）
-  - **依赖**：T-W2.2.3 全量抽取完成
-  - **资源**：8×H20（设计原文 2×H100 ~20h，H20 估 15-20h）
-  - **配置**：lr 5e-4 → 1e-5 cosine；global bs 256（n_tasks=32 × n_demos=8，跨 8 rank 自动分片为 4 tasks × 8 demos / rank）
-  - **启动命令**：`WANDB_ENTITY=<你> bash examples/PlanAndVerify/train_files/run_lclgp.sh`
-  - **输出**：`playground/Checkpoints/pav_w3_lclgp_v1/checkpoints/steps_2400_pytorch_model.pt` + `final_model/pytorch_model.pt`
+- [x] **T-W3.3.4** 30 epoch full run on 8×H20（v1 完成 2026-05-04）
+  - **完成**：用户在 8×H20 跑完 v1，墙钟约 0.5h（明显短于设计文档预期 15-20h —— 可能数据更小或并行更优）；`final_model/pytorch_model.pt` 178 MB
+  - **末段 W&B**：`sigma_*_mean=148.4=exp(5.0)`（**σ 顶到 cap，根因**）/ `l_cf=0`（hinge 满 margin，健康）/ `l_ctr=2.6`（未收敛）/ `mode_balance_std_end=5e-5`（假性达标，详见 docs/lclgp_diagnostics.md §3.3）
+  - **输出**：`playground/Checkpoints/pav_w3_lclgp_v1/final_model/pytorch_model.pt`
 
 ### 3.4 D1-D4 诊断（论文 §4.5 基础）
 
@@ -384,44 +384,65 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
   - **完整功能**：`g1`（min-of-K + best-σ 对 GT 余弦） / `d1`（a/b/c：mode 两两余弦、mode 选中频率、σ-vs-error Pearson）/ `d2`（a/b：CF L1、同 task 跨 start 方差）/ `d3`（a：end↔delta 互换余弦差） / `report`（聚合所有 CSV → `docs/lclgp_diagnostics.md`）
   - **桩**（依赖外部组件，写有清晰 TODO）：`g2`（V-JEPA 2 decoder）/ `g3`（V-JEPA 2-AC 单步 CEM）/ `d1d`/`d2c`/`d3b`（需重训 ablation ckpt）
 
-- [ ] **T-W3.4.2** G-1 Min-of-K 余弦
-  - **验收**：mean ≥ 0.75；< 0.6 触发回炉
-  - **输出**：`paper/tables/lclgp_g1.csv`
+- [x] **T-W3.4.2** G-1 Min-of-K 余弦（v1: ❌ FAIL）
+  - **v1 实测**：`G1_end_min_cos=0.213`（阈值 ≥ 0.75，远低）/ `G1_delta_min_cos=0.918`（通过）/ `G1_end_sigma_cos=0.202`、`G1_delta_sigma_cos=0.740`
+  - **解读**：end head 几乎没学（接近随机），delta head 健康；σ saturation 导致 σ-best 选模等于随便选
+  - **输出**：[paper/tables/lclgp_g1.csv](paper/tables/lclgp_g1.csv)
 
-- [ ] **T-W3.4.3** G-2 解码可视化
-  - **要点**：用 V-JEPA 2 frame decoder（如可用）解 best-mode 回像素；找不到 decoder 则跳过解码，只画 latent space PCA
-  - **输出**：`paper/figures/lclgp_decoded_samples/{task}_*.png`
+- [ ] **T-W3.4.3** G-2 解码可视化（无 V-JEPA 2 像素 decoder，跳过；保留 [ ]）
+  - **要点**：当前 V-JEPA 2 仅 encoder + AC predictor，没有 frame decoder；W4/论文阶段如需可补 PCA 可视化
 
-- [ ] 🚧 **T-W3.4.4** G-3 reach 任务零样本规划【**Gate 关键测试**】
-  - **要点**：用 LCLGP best-mode 替代 image goal，跑 V-JEPA 2-AC 单步 CEM 在 reach 任务（LIBERO-Spatial 中最简单的 5 个任务）
+- [ ] 🚧 **T-W3.4.4** G-3 reach 任务零样本规划【**Gate 关键测试**】（v1 跳过；待 v2 retrain）
+  - **跳过理由**：v1 7 阈值仅通过 1 条，端到端 G-W3 跑完 30+ 小时 sharded 概率极低；优先 v2 retrain 修 σ saturation 后再决定
+  - **要点**：用 LCLGP best-mode 替代 image goal，跑 V-JEPA 2-AC 单步 CEM 在 reach 任务（LIBERO-Spatial 10 任务 × 30 trials，含 image-goal Oracle 对照）
   - **🚧 Gate**：成功率 ≥ 70%（image goal baseline 通常 ~100%）
-  - **失败时回退**：见 0.2 G-W3 的回退方案
 
-- [ ] **T-W3.4.5** D1-a/b/c/d 多模态诊断
-  - **D1-a**：模式两两余弦 ∈ [0.3, 0.7]
-  - **D1-b**：最不活跃 mode 选中率 ≥ 10%
-  - **D1-c**：σ vs 误差 Pearson ≥ 0.4
-  - **D1-d**：与 K=1 baseline 对比 G-1 提升 ≥ 5 个点（额外训一个 K=1 ckpt）
+- [x] **T-W3.4.5** D1-a/b/c/d 多模态诊断（v1: ❌ FAIL — 模式塌缩）
+  - **v1 实测**：D1-a `pairwise_cos=0.957`（远超 [0.3, 0.7]）/ D1-b `min_freq_end=0.013, delta=0.0`（低于 0.10）/ D1-c `Pearson=nan`（σ 是常数）
+  - **mode 分布**：`cov_end k0=0.17, k1=0.013, k2=0.063, k3=0.76` —— 76% 样本路由到 k=3，K=4 实际 = K=1
+  - **D1-d ablation**：未跑（依赖额外 K=1 ckpt；v2 通过后再补）
+  - **输出**：[paper/tables/lclgp_d1.csv](paper/tables/lclgp_d1.csv)
 
-- [ ] **T-W3.4.6** D2-a/b/c 状态依赖诊断
-  - **D2-a**：反事实差异 ≥ hinge margin
-  - **D2-c**：z_t-ablation 对比 G-1 掉 ≥ 5 个点（额外训一个 z_t-ablation ckpt）
+- [x] **T-W3.4.6** D2-a/b/c 状态依赖诊断（v1: ✅ D2-a 通过）
+  - **v1 实测**：D2-a `cf_L1=0.740`（远超 ≥ 0.05）/ D2-b `median_intra_task_std=0.820, num_tasks_with_4plus=40`（信息项）
+  - **解读**：唯一通过的诊断；z_t 真在被使用，状态依赖性已学到（L_cf 不依赖 σ，所以未受 saturation 影响）
+  - **D2-c ablation**：未跑（依赖额外 z_t-ablation ckpt；v2 通过后再补）
+  - **输出**：[paper/tables/lclgp_d2.csv](paper/tables/lclgp_d2.csv)
 
-- [ ] **T-W3.4.7** D3-a/b 时间尺度诊断
-  - **D3-a**：互换 end/delta 后 chunk-scale Spearman 绝对值 < 0.3
-  - **D3-b**：双 head 比单 head 在 chunk verify 准确率高 ≥ 5 个点
+- [x] **T-W3.4.7** D3-a/b 时间尺度诊断（v1: ❌ FAIL — 时间尺度未分化）
+  - **v1 实测**：`end→end=0.20, end→delta=0.18, delta→delta=0.74, delta→end=0.74`；end_gap=0.021、delta_gap=0.004（均 < 0.05）
+  - **解读**：end head 没学（对两种 GT 都差）；delta head 学到的是"通用近未来"，不区分尺度
+  - **D3-b ablation**：未跑（依赖 end-only / delta-only ckpt；v2 通过后再补）
+  - **输出**：[paper/tables/lclgp_d3.csv](paper/tables/lclgp_d3.csv)
 
-- [ ] **T-W3.4.8** 出诊断报告 → `docs/lclgp_diagnostics.md`
-  - **要点**：表 + 图，可直接迁入论文 §4.5
+- [x] **T-W3.4.8** 出诊断报告 → [docs/lclgp_diagnostics.md](docs/lclgp_diagnostics.md)
+  - **完成**：v1 retrospective + 4 CSV 表 + σ-saturation 单一根因分析 + v2 remediation plan + 重训预期；阈值汇总 1/7 通过
+  - **后续**：v2 retrain 完成后追加 v2 章节
 
 ### 3.5 Gate 决策
 
-- [ ] **T-W3.5.1** 召开内部 review，决定继续 / 回退
-  - **依赖**：T-W3.4.4
+- [x] **T-W3.5.1** 召开内部 review，决定继续 / 回退（v1 决策完成 2026-05-04）
+  - **v1 决策**：1/7 阈值通过 + σ saturation 单一根因诊断 → **不直接回退 PaV-Lite**，先做 v2 retrain（保持原 K=4 双时间尺度多模态架构 + 5 损失，仅微调 hparam + 2 处代码）；详见 [docs/lclgp_diagnostics.md §4](docs/lclgp_diagnostics.md)
+  - **保留的回退路径**（仅当 v2 通过 ≤ 3/7）：K=2 简化版 → PaV-Lite
+
+### 3.6 v2 Remediation（σ saturation 修复 retrain）
+
+- [x] **T-W3.6.1** 写 v2 配置 + 代码改动
+  - **配置**：[examples/PlanAndVerify/configs/lclgp_v2.yaml](examples/PlanAndVerify/configs/lclgp_v2.yaml)（log_sigma_max 5→1.5、β 0.1→0.5、λ_bal 0.05→0.3、max_train_steps 2400→4800）
+  - **代码**：[lclgp.py](starVLA/model/framework/PlanVerify/lclgp.py) 两处微改 — (1) `__init__` slot_end/slot_delta 改为正交初始化；(2) `forward` 把 `_mode_balance_loss` 输入从含 σ 的 per_mode_loss 改为 raw L1（关键，斩断 σ 通过 L_bal 的 shortcut）
+  - **smoke 测试**：CPU forward+backward 正常，slot pairwise cosine off-diag ~1e-9（严格正交）
+
+- [ ] **T-W3.6.2** v2 retrain 60 epoch on 8×H20（**等待用户**）
+  - **启动**：`WANDB_ENTITY=<你> bash examples/PlanAndVerify/train_files/run_lclgp.sh --config_yaml examples/PlanAndVerify/configs/lclgp_v2.yaml`
+  - **预期**：~1h 墙钟（v1 30 epoch 0.5h 推算）
+  - **观察项**：σ_*_mean 应 ≈ 1（log σ ≈ 0），不再贴 cap；mode_balance_std 应 > 0.1（真分化）；l_ctr 应 < 1.5（开始收敛）；l_recon_end 应明显下降
+
+- [ ] **T-W3.6.3** v2 诊断 + 决策
+  - **跑**：4 个诊断命令 on v2 ckpt（同 W3.4.2/4.5/4.6/4.7 脚本，把 ckpt 路径换成 v2）
   - **决策树**：
-    - G-3 ≥ 70% → 进 W4 全功能 PaV
-    - G-3 50-70% → 训 K=2 简化版重测；通过则进 W4 简化路线
-    - G-3 < 50% → 回退到仅 end goal 的 PaV-Lite（M1）
+    - 通过 ≥ 6/7 → 进 Stage B 跑 G-W3 reach gate（[T-W3.4.4](#-t-w3-4-4)）
+    - 通过 4-5/7 → 上 v2 备选两项（bal_temperature 退火 + repulsive loss + α 不对称），再训一轮
+    - 通过 ≤ 3/7 → 回退 K=2（n_modes=4→2 + 同 v2 hparam）；K=2 仍不行 → PaV-Lite
 
 ---
 

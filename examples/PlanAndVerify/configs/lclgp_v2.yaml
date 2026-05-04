@@ -1,0 +1,105 @@
+# LCLGP v2 — σ-saturation root-cause fix retrain.
+#
+# Diff from v1 (see docs/lclgp_diagnostics.md "v2 remediation"):
+#   - log_sigma_max: 5.0 → 1.5      # σ ∈ [0.007, 4.48] instead of [0.007, 148]
+#   - beta:          0.1 → 0.5      # σ regularization 5× stronger
+#   - lambda_bal:    0.05 → 0.3     # mode-balance KL 6× stronger
+#   - max_train_steps:    2400 → 4800   # 30 epoch → 60 epoch
+#   - num_warmup_steps:   200 → 400     # proportional
+#   - save_interval:      400 → 800     # proportional
+#   - run_id: pav_w3_lclgp_v1 → pav_w3_lclgp_v2
+#
+# Code-side changes accompanying this config (lclgp.py):
+#   - L_bal now receives raw L1 (not σ-divided per_mode_loss) — closes σ-shortcut
+#   - slot_end / slot_delta use orthogonal init across the K modes
+#
+# Architecture / data / 5-loss design unchanged from v1.
+
+data:
+  lclgp_dataset:
+    output_dir: data/lclgp_dataset/pav_libero
+    index_train: data/lclgp_dataset/pav_libero/index_train.parquet
+    index_val:   data/lclgp_dataset/pav_libero/index_val.parquet
+    index_test:  data/lclgp_dataset/pav_libero/index_test.parquet
+    text_emb:    data/lclgp_dataset/pav_libero/text_emb.h5
+    latent_root: data/latents/pav_libero
+    view: primary
+
+  triplet:
+    samples_per_demo: 10
+    delta_steps: 50
+
+  text_encoder:
+    name: qwen3_vl_4b
+    path: playground/Pretrained_models/Qwen3-VL-4B-Instruct
+    hidden_size: 2560
+    dtype: bf16
+
+  vjepa:
+    n_tokens: 256
+    hidden_size: 1408
+
+  sampler:
+    n_tasks: 32
+    n_demos: 8
+    seed: 0
+
+framework:
+  name: LCLGP
+  lclgp:
+    d_text: 2560
+    d_latent: 1408
+    d_hidden: 1024
+    n_heads: 16
+    n_layers: 4
+    n_modes: 4
+    n_tokens: 256
+    z_dropout: 0.1
+    attn_dropout: 0.1
+    mlp_ratio: 4.0
+
+    loss:
+      alpha: 0.5
+      beta: 0.5             # v1: 0.1 — σ* = ||·||/β; with β=0.5 and ||·||~0.5, σ*~1 (log_σ*~0)
+      lambda_bal: 0.3       # v1: 0.05 — pair with raw-L1 input to actually penalize collapse
+      lambda_ctr: 0.1
+      lambda_cf: 0.05
+      tau: 0.07
+      cf_margin: 0.05
+      log_sigma_min: -5.0
+      log_sigma_max: 1.5    # v1: 5.0 — σ ∈ [0.007, 4.48], no escape valve to 148
+      bal_temperature: 1.0
+
+trainer:
+  max_train_steps: 4800     # v1: 2400 (30 epoch) — give 5 losses room to negotiate
+  num_warmup_steps: 400     # v1: 200, proportional (8.3%)
+  logging_frequency: 20
+  save_interval: 800        # v1: 400, proportional
+  num_workers: 4
+
+  learning_rate:
+    base: 5.0e-4
+  lr_scheduler_type: cosine
+  scheduler_specific_kwargs: {}
+  optimizer:
+    betas: [0.9, 0.999]
+    weight_decay: 0.05
+    eps: 1.0e-8
+  gradient_clipping: 1.0
+
+  loss_scale:
+    vla: 1.0
+
+  save_format: pt
+  freeze_modules: ""
+  pretrained_checkpoint: null
+  reload_modules: null
+  is_resume: false
+
+seed: 0
+is_debug: false
+run_root_dir: ./playground/Checkpoints
+run_id: pav_w3_lclgp_v2
+output_dir: null
+wandb_project: pav-w3-lclgp
+wandb_entity: null

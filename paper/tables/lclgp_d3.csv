@@ -1,0 +1,7 @@
+metric,value,pass
+D3a_end→end_cos_mean,0.20228442549705505,
+D3a_end→delta_cos_mean,0.1808714121580124,
+D3a_delta→delta_cos_mean,0.7404241561889648,
+D3a_delta→end_cos_mean,0.7364127039909363,
+D3a_end_specialization_gap,0.021413013339042664,False
+D3a_delta_specialization_gap,0.0040114521980285645,False
