@@ -1,4 +1,4 @@
 metric,value,threshold,pass
-D2a_mean_cf_L1,0.10353413969278336,0.05,True
-D2b_median_intra_task_std,0.09016229584813118,,
+D2a_mean_cf_L1,0.14703789353370667,0.05,True
+D2b_median_intra_task_std,0.1287112832069397,,
 D2b_num_tasks_with_4plus_samples,40.0,,

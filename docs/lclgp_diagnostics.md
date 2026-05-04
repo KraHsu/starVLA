@@ -683,4 +683,70 @@ end-router 和 delta-router 可独立路由（user 决策点）。理由：v2-v4
 **Hard cutoff（架构改动唯一一次尝试）**：
 - v5 ≥ 5/7（用 D1-d）→ 升级 baseline_table.csv = v5；进 Stage B 用 v5 plan-prior
 - v5 ≤ 4/7 → **回退 option B**：用 v2 ckpt 当 plan-prior 进 Stage B；mode-balance 留 ablation
-- **没有 v6**。架构改动是 W3 最后一次尝试；进一步 hparam 调试已证 path B 撞顶。
+- **没有 v6**。架构改动是 W3 最后一次尝试;进一步 hparam 调试已证 path B 撞顶。
+
+---
+
+## §11 v5 retrain 诊断 + postmortem(2026-05-05)
+
+### 11.1 W&B 末段实测
+
+数据机 8×H20 retrain ~50 min,step 4800 W&B:训练 loss finite、grad 正常。诊断脚本一次性失败(`predict_goal` fp16 dtype mismatch in `RoutingModule.forward`),修复后 commit `772deee` 重跑诊断,4 cmd 一次性跑通。
+
+| W&B 指标(末段) | 实测 | 注 |
+|---|---|---|
+| sigma_end_mean / sigma_delta_mean | 不显著(σ-head 已脱离 routing) | 见 D1-c |
+| pi_router_end / pi_router_delta | k2 / k3 各自 100% | router 完全塌缩(D1-d=0) |
+| gumbel_temperature_current | 0.5(收敛到设计下界) | schedule 正确 |
+| router_warmup_active | step ≥ 500 = 0 | warmup 退出后塌缩开始 |
+
+### 11.2 5 版本 7-阈值汇总(D1-d 替换 D1-b 作为 v5 主路由指标)
+
+| # | Metric | Threshold | v1 | v2 | v3 | v4 | **v5** | v5 Pass |
+|---|---|---|---|---|---|---|---|---|
+| 1 | G1_end_min_cos_mean | ≥ 0.75 | 0.213 | 0.799 | 0.862 | 0.795 | **0.291** | ❌ |
+| 2 | G1_end_sigma_cos_mean(v5: router_cos)| ≥ 0.70 | 0.202 | 0.769 | 0.317 | 0.319 | **0.291** | ❌ |
+| 3 | D1-a pairwise cos ∈ [0.30, 0.70] | range | 0.957 | 0.882 | 0.149 | 0.227 | **−0.001** | ❌ |
+| 4 | D1-d / D1-b min mode/router freq end | ≥ 0.10 | 0.013 | 0.0 | 0.0 | 0.0 | **0.0** | ❌ |
+| 5 | D1-c Pearson(σ, err) | ≥ 0.40 | nan | +0.747 | −0.818 | −0.707 | **−0.899** | ❌ |
+| 6 | D2-a cf L1 | ≥ 0.05 | 0.740 | 0.319 | 0.162 | 0.104 | **0.147** | ✅ |
+| 7 | D3-a end specialization gap | ≥ 0.05 | 0.021 | 0.018 | 0.019 | 0.014 | **0.028** | ❌ |
+
+**v5 = 1/7。** 低于 v1(1/7),远低于 v2 4/7。三个本应是 v5 强项的指标(D1-a / D1-d / D1-c)反而最差。
+
+### 11.3 三处独立失效模式 — postmortem
+
+**(a) End vs delta 极端不对称(G1_end 0.291 vs G1_delta 0.990)**
+
+delta head 表现 ≈ 完美(v1-v5 一致 G1_delta ≥ 0.99),end head 在 v5 退化到接近随机(K=4 cosine 基线 ≈ 0.25)。一种解读:V-JEPA latent 在 (lang, z_t) 条件下,**delta = z_end − z_t 的可预测性显著强于 z_end 本身**,跨所有 5 个版本都是这样。v5 的 routing-weighted recon 把 end 的训练信号从 min-of-K 的"安全网"换成了"router 选定的单一 mode 拿全部梯度";一旦 router 塌缩,选定的那个 end mode 也不一定是最好的,梯度被锁在错误位置。
+
+**(b) Router 塌缩(D1-d end k2 = 1.0,delta k3 = 1.0)**
+
+500-step 确定性均匀 warmup + Gumbel anneal 5.0→0.5(过 4800 step)没顶住。后 4300 step Gumbel-STE 接近 one-hot,recon 梯度全流向单一 mode,经典 MoE 冷启失败。诊断时 `predict_goal` 是 argmax 模式,完全确定性,所以 D1-d 直接归 0。
+
+**(c) σ-head 反相校准(Pearson −0.899,五个版本里最差)**
+
+v1-v4 σ-head 的"硬约束"来自 min-of-K hindsight:per_mode_loss = L1/σ + β·logσ,在 min 操作下 σ 会被压向真正的不确定度(否则 min 会跳到别的 mode)。v5 把 σ-head"释放"出 routing duty,recon 改走 router 加权:router 一塌缩,只有一对 (σ_k, recon_k) 持续接到梯度,另外 3 个 σ 自由漂移;一对里头 σ 还和 recon 解耦优化,**β·logσ 的小 penalty 让 σ 持续下探到 −5 floor 拿正反馈**,所以 σ 与 err 强烈反相。
+
+### 11.4 失效根因汇总
+
+C1+C2+C3 一次同时动了 3 个旋钮(Gumbel 路由、routing-weighted recon、explicit RoutingModule)且耦合方向相同 — 都把"hindsight argmin 提供的硬约束"换成了"learned router 提供的软约束"。在没有强 aux load-balance 损失的前提下,**learned router 没有足够的优化压力维持均匀分布**,500 step warmup 又太短,K=4 模式间的微弱差异在 Gumbel 渐冷时被指数放大成 winner-take-all。
+
+诊断结论(用作 paper W3 §):**explicit MoE routing 在 LCLGP 任务上,以本仓库当前的训练预算(60 epoch, ~5k step) + warmup 配置,会因冷启动失败导致灾难性回归。** 这不是参数容量问题(v2 同等参数 4/7),是 routing 优化动力学问题。
+
+### 11.5 Hard Cutoff 触发 → Option B
+
+**v5 = 1/7 ≤ 4 → 触发 Option B(§10.10 已锁):**
+
+- W3 LCLGP 最优锁 **v2 = 4/7**;`paper/tables/baseline_table.csv` 不动
+- `paper/tables/lclgp_*.csv` 当前为 v5 数据(覆盖 v4 commit `2bfa82c`),git 历史保留 v2-v4 数据
+- mode-balance 议题转 **W3 ablation**(paper §:"我们尝试了 explicit MoE routing,失效模式见 §11")
+- **Stage B 起步用 v2 ckpt 当 plan-prior**
+
+### 11.6 v5 commit 链
+
+```
+e81d306 [PAV] feat: LCLGP v5 — explicit MoE routing (C1+C2+C3)        # Phase 1 代码
+772deee [PAV] fix: cast fp16 batch dtype at RoutingModule entry        # 诊断阻塞修复
+<下一 commit> [PAV] data: LCLGP v5 retrain diagnostics — 1/7, hard cutoff → option B
+```

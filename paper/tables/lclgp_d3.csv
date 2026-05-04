@@ -1,7 +1,7 @@
 metric,value,pass
-D3a_end→end_cos_mean,0.3191181719303131,
-D3a_end→delta_cos_mean,0.30462515354156494,
-D3a_delta→delta_cos_mean,0.8372992277145386,
-D3a_delta→end_cos_mean,0.8320221900939941,
-D3a_end_specialization_gap,0.014493018388748169,False
-D3a_delta_specialization_gap,0.005277037620544434,False
+D3a_end→end_cos_mean,0.2913200557231903,
+D3a_end→delta_cos_mean,0.2632749676704407,
+D3a_delta→delta_cos_mean,0.9898764491081238,
+D3a_delta→end_cos_mean,0.981395959854126,
+D3a_end_specialization_gap,0.028045088052749634,False
+D3a_delta_specialization_gap,0.008480489253997803,False

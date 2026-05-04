@@ -493,7 +493,7 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
   - 详见 [docs/lclgp_diagnostics.md §9.6](docs/lclgp_diagnostics.md) trade-off 表
   - 30-40% C 失败概率已知；`paper/tables/baseline_table.csv` 仍锁 v2 直到 Phase 3 决策
 
-- [ ] **T-W3.6.7** v5 = explicit MoE routing — Phase 1（代码 + smoke + commit）
+- [x] **T-W3.6.7** v5 = explicit MoE routing(Phase 1+2+3 全闭环,Hard Cutoff 触发 → Option B)
   - **配置**：`examples/PlanAndVerify/configs/lclgp_v5.yaml`（commit 待 push）
     - `use_router: true` / `gumbel_temperature_init: 5.0` / `gumbel_temperature_min: 0.5` / `router_warmup_steps: 500`
     - α / β / λ_bal / λ_ctr / λ_cf / λ_rep / λ_rep_warmup_steps / log_sigma_max 全沿用 v4
@@ -525,6 +525,16 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
     - **没有 v6**。Phase 3 后无论结果如何，T-W3.6.7 关闭，进入 W4
   - **关键 W&B 监测点**：`gumbel_temperature_current`（5.0→0.5 anneal）、`pi_router_end_min` / `pi_router_delta_min`（routing 是否塌缩）、`router_warmup_active`（step < 500）、`mode_argmin_end` 直方图（router 选中的 mode 分布）
   - **详见**：[docs/lclgp_diagnostics.md §10](docs/lclgp_diagnostics.md)
+  - **Phase 2 阻塞修复(2026-05-05)**:`predict_goal` 走 v5 router 时 fp16 dtype mismatch in `RoutingModule.forward`(V-JEPA latent / text_emb 磁盘是 fp16,模型权重默认 fp32;`_forward_core` 入口 cast 但 router 漏了)。修复 commit `772deee`,在 `RoutingModule.forward` 入口 mirror `_forward_core` 的 `compute_dtype` cast。
+  - **Phase 3 诊断结果(2026-05-05)**:**v5 = 1/7 ≤ Hard Cutoff 4/7 → 触发 Option B**
+    - 仅 D2-a cf L1(0.147)通过;G1_end_min_cos 0.795→**0.291**(灾难性回退,接近 K=4 cosine 基线 0.25);D1-d end k2=1.0 / delta k3=1.0(router 完全塌缩);D1-c Pearson 0.707→**−0.899**(五版本最差);D1-a pairwise cos 0.227→**−0.001**(K mode 输出近正交)
+    - **三处独立失效模式**:(a) end vs delta 极端不对称(G1_end 0.291 vs G1_delta 0.990);(b) router 塌缩 — 500 step warmup 太短 + Gumbel anneal 退到 0.5 后 STE 接近 one-hot,recon 梯度全流向单一 mode;(c) σ-head 反相校准 — 失去 v1-v4 min-of-K hindsight 的硬约束,β·logσ 小 penalty 让 σ 持续下探到 −5 floor
+    - **诊断结论**:explicit MoE routing 在本仓库训练预算(60 epoch / ~5k step) + 当前 warmup 配置下,因冷启失败导致灾难性回归。**不是参数容量问题(v2 同参数 4/7),是 routing 优化动力学问题**。
+  - **Hard Cutoff 触发 → Option B(已落)**:
+    - W3 LCLGP 最优锁 **v2 = 4/7**;`paper/tables/baseline_table.csv` 不动
+    - mode-balance 议题转 W3 ablation(paper W3 §:"我们尝试了 explicit MoE routing,失效模式见 docs §11")
+    - Stage B 起步用 v2 ckpt 当 plan-prior(下一步:Explore Stage B driver pipeline,出 plan)
+  - **详见**:[docs/lclgp_diagnostics.md §11](docs/lclgp_diagnostics.md)
 
 ---
 
