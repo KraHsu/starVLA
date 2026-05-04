@@ -128,9 +128,14 @@ class RoutingModule(nn.Module):
     def forward(
         self, text_emb: torch.Tensor, text_mask: torch.Tensor, z_t: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # V-JEPA latent / text_emb caches are fp16 on disk; model weights default
+        # to fp32. Mirror ``_forward_core``'s entry cast so router Linears match.
+        compute_dtype = self.text_proj.weight.dtype
+        text_emb = text_emb.to(compute_dtype)
+        z_t = z_t.to(compute_dtype)
         # Mask-aware mean-pool over text (PyTorch convention here is W2's:
         # text_mask True = valid token), simple mean-pool over z_t patches.
-        mask_f = text_mask.float().unsqueeze(-1)  # [B, L, 1]
+        mask_f = text_mask.to(compute_dtype).unsqueeze(-1)  # [B, L, 1]
         text_pool = (text_emb * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1.0)
         zt_pool = z_t.mean(dim=1)  # [B, d_latent]
         feat = self.shared(self.text_proj(text_pool) + self.zt_proj(zt_pool))
