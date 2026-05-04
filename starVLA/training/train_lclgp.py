@@ -263,6 +263,12 @@ class LcLgpTrainer(TrainerUtils):
             if self.accelerator.sync_gradients:
                 progress_bar.update(1)
                 self.completed_steps += 1
+                # LCLGP v3 path B: bal_temperature anneal reads training_step buffer.
+                # No-op for frameworks without the buffer.
+                _unwrapped = self.accelerator.unwrap_model(self.model)
+                _ts = getattr(_unwrapped, "training_step", None)
+                if isinstance(_ts, torch.Tensor):
+                    _ts.fill_(self.completed_steps)
 
             self._log_metrics(metrics)
 
