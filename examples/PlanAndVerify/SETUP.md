@@ -312,3 +312,173 @@ rm -rf playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/results/
    from §4 once per user.
 5. **`task.html`, `*.code-workspace`** — IDE artifacts from VS Code. They
    appear as untracked but should never be committed.
+
+## 11. W2 — V-JEPA 2 latent cache + LCLGP dataset
+
+W2 produces the inputs LCLGP training (W3) consumes:
+
+- **V-JEPA 2 latent shards**: per-frame `[256, 1408] fp16` for each LIBERO
+  trajectory, stored as one HDF5 per `(dataset, rank)` pair.
+- **LCLGP triplet index**: `(t, t+Δ, T-1)` row indices into the latent
+  shards plus a cached Qwen3-VL-4B text embedding per unique instruction.
+
+W2 sprint scope: **LIBERO 4 suites only**. Bridge-v2 raw at
+`/mnt/cpfs/zch/assets/BridgeData_V2` (388 GB OpenDataLab RLDS tfrecord) is
+deferred to a side task — it does not gate W3 (research_design §5.4).
+
+### 11.1 V-JEPA 2 latent extraction (T-W2.2.3)
+
+The extractor walks the LeRobot v3 `pav_libero` mixture and writes
+`data/latents/pav_libero/<dataset>/<dataset>_rank{NN}.h5`. Per-shard layout:
+
+```
+attrs:   data_name, robot_type, num_frames, tubelet_size,
+         img_size, patch_size, dtype, vjepa_ckpt, imagenet_mean/std
+/index   compound (traj_id:i8, length:i8)
+/traj_<id:06d>/
+    primary  [T, 256, 1408] fp16    # main camera
+    wrist    [T, 256, 1408] fp16    # wrist camera (LIBERO has both)
+    attrs:   lang (utf8), length (i8)
+```
+
+Dry run on 10 LIBERO-Long demos (single GPU, ~3 min, ~3.5 GB):
+
+```bash
+.venv/bin/python scripts/extract_vjepa_latents.py \
+    --mixture pav_libero_long --max-trajs 10 \
+    --output-dir data/latents/dryrun
+```
+
+Full extraction across the 4 suites — uses `torchrun` with one rank per
+GPU, each rank handles `traj_idx % world_size == rank`:
+
+```bash
+# Defaults: GPU_LIST="0..7", OUTPUT_DIR=data/latents/pav_libero, DTYPE=fp16
+bash examples/PlanAndVerify/eval_files/extract_pav_libero.sh
+
+# Override to limit GPUs / change output / drop wrist view to halve disk
+GPU_LIST="0 1 2 3" NO_WRIST=1 \
+    bash examples/PlanAndVerify/eval_files/extract_pav_libero.sh
+```
+
+Disk budget for the full 4 suites with both views: **~340 GB**
+(`docs/data_storage_plan.md` projects 1.52 TB at full Bridge+LIBERO scope).
+Set `NO_WRIST=1` to drop the wrist channel (~half the disk; OK for LCLGP
+since the design doc only uses the primary view).
+
+Sanity-check one shard after the run:
+
+```bash
+.venv/bin/python -c "
+from starVLA.datasets.vjepa_latent_dataset import VJEPALatentShardSet
+s = VJEPALatentShardSet('data/latents/pav_libero/libero_10_no_noops_1.0.0_lerobot')
+print(f'trajs={s.num_trajectories}  frames={s.total_frames}')
+ref = s.trajectory_refs()[0]
+z = s.get_frame(ref.traj_id, 0)
+print(f'frame shape={z.shape}  dtype={z.dtype}  lang={s.get_language(ref.traj_id)!r}')
+"
+```
+
+Expect ~500 trajs per suite, ~150 mean demo length, frame shape
+`(256, 1408)` fp16.
+
+### 11.2 LCLGP triplet dataset (T-W2.3.* / T-W2.4.1)
+
+`scripts/build_lclgp_dataset.py` consumes the latent shards and:
+
+1. samples 10 random `(t, t+Δ, T-1)` triplets per demo (Δ=50 = one chunk),
+2. caches a Qwen3-VL-4B text embedding per unique instruction by calling
+   `model.model.language_model` directly (skips the vision tower entirely;
+   hidden=2560 — note research_design §5.2's `d_text=2048` was the
+   Qwen2.5-VL-3B figure and is corrected in `lclgp_v1.yaml`),
+3. stratifies an 80/10/10 split per task, by demo, with the invariant that
+   every task is present in train (so `TaskGroupedSampler` can satisfy
+   `n_tasks=32` on the train set),
+4. writes `STATS.md`, parquet indices, `text_emb.h5`, and `manifest.json`
+   to the output dir.
+
+Output layout:
+
+```
+data/lclgp_dataset/pav_libero/
+├── index_train.parquet     (data_name, traj_id, t, t_delta, t_end,
+│                            lang_hash, length, lang)
+├── index_val.parquet
+├── index_test.parquet
+├── text_emb.h5             /<lang_hash>/emb [L, 2560] fp16
+│                                       attrs: lang (utf8), n_tokens, hidden
+├── manifest.json
+└── STATS.md
+```
+
+Dry-run build (uses the dryrun shard from §11.1, ~30 s including Qwen3-VL
+load):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/build_lclgp_dataset.py \
+    --latent-root data/latents/dryrun \
+    --mixture pav_libero_long \
+    --output-dir data/lclgp_dataset/dryrun \
+    --qwen-vlm playground/Pretrained_models/Qwen3-VL-4B-Instruct \
+    --text-dtype bf16
+```
+
+Full build (after §11.1 finishes):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python scripts/build_lclgp_dataset.py \
+    --latent-root data/latents/pav_libero \
+    --mixture pav_libero \
+    --output-dir data/lclgp_dataset/pav_libero \
+    --qwen-vlm playground/Pretrained_models/Qwen3-VL-4B-Instruct \
+    --text-dtype bf16
+```
+
+Pass `--skip-text-emb` for a fast structural-only check that doesn't load
+Qwen3-VL (text_emb.h5 will be empty; useful when iterating on triplet
+sampling logic).
+
+Read `STATS.md` after the run. Pass criteria:
+
+- per-dataset: `trajs_used == n_trajs` (no skipped-as-too-short),
+- per-task table: every row has `train ≥ 1`,
+- per-split: train rows ≈ 80 % of total, all tasks represented in train.
+
+### 11.3 Smoke check the dataloader
+
+```bash
+.venv/bin/python -m starVLA.datasets.lclgp_triplet_dataset \
+    --index data/lclgp_dataset/dryrun/index_train.parquet \
+    --latent-root data/latents/dryrun \
+    --text-emb data/lclgp_dataset/dryrun/text_emb.h5 \
+    --n-tasks 4 --n-demos 2
+```
+
+Expect a one-batch print like:
+
+```
+len(dataset)=90  unique tasks=6  text_hidden=2560
+{'text_emb': torch.Size([8, L, 2560]), 'text_mask': torch.Size([8, L]),
+ 'z_t': torch.Size([8, 256, 1408]), 'z_delta': torch.Size([8, 256, 1408]),
+ 'z_end': torch.Size([8, 256, 1408]), 'task_id': 8, 'lang': 8, ...}
+```
+
+`L` is the longest tokenized instruction in the batch; `collate_lclgp`
+right-pads + emits a `text_mask`. The W3 trainer wires this dataset and
+sampler into `examples/PlanAndVerify/configs/lclgp_v1.yaml`.
+
+### 11.4 W2 known fragility
+
+1. **HDF5 handles are not fork-safe**. `VJEPALatentShardSet` opens files
+   lazily and keeps the handles around; instantiate one shard set per
+   DataLoader worker (or use `num_workers=0` until you wrap it).
+2. **`apply_chat_template` would break LCLGP**. We deliberately tokenize
+   instructions with `processor.tokenizer(lang)` — feeding chat scaffolding
+   tokens (`<|im_start|>`, role markers) into LCLGP would shift the
+   contextualized embedding away from raw-instruction semantics.
+3. **Tiny task pools**. The 80/10/10 split rounds toward train when a task
+   has fewer than ~5 demos. On the dryrun (10 demos / 6 tasks) you should
+   expect val=0; on full LIBERO (~50 demos × 40 tasks) the split is honest.
+4. **`d_text=2560`, not 2048**. The number in research_design §5.2 was the
+   Qwen2.5-VL-3B figure; Qwen3-VL-4B-Instruct's `text_config.hidden_size`
+   is 2560. The W3 LCLGP `text_proj` must use 2560 — `lclgp_v1.yaml` does.

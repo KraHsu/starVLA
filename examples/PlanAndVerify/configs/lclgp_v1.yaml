@@ -1,0 +1,40 @@
+# LCLGP v1 — data section.
+#
+# T-W2 deliverable. Only the `data:` block is final; model/training/optimizer
+# fields land with W3 (T-W3.3.1). The W3 trainer reads:
+#   - data.lclgp_dataset.* to build LcLgpTripletDataset / TaskGroupedSampler
+#   - data.text_encoder.hidden_size for LCLGP's d_text projection
+#
+# Note on d_text: research_design_plan_and_verify.md §5.2 lists d_text=2048
+# (Qwen2.5-VL-3B figure). starVLA-PI deploys Qwen3-VL-4B-Instruct whose text
+# tower is 2560-dim — this config sets the LCLGP input projection accordingly.
+
+data:
+  lclgp_dataset:
+    # Output of scripts/build_lclgp_dataset.py
+    output_dir: data/lclgp_dataset/pav_libero
+    index_train: data/lclgp_dataset/pav_libero/index_train.parquet
+    index_val:   data/lclgp_dataset/pav_libero/index_val.parquet
+    index_test:  data/lclgp_dataset/pav_libero/index_test.parquet
+    text_emb:    data/lclgp_dataset/pav_libero/text_emb.h5
+    latent_root: data/latents/pav_libero
+    view: primary           # primary | wrist
+
+  triplet:
+    samples_per_demo: 10
+    delta_steps: 50         # = 1 chunk (H=50)
+
+  text_encoder:
+    name: qwen3_vl_4b
+    path: playground/Pretrained_models/Qwen3-VL-4B-Instruct
+    hidden_size: 2560       # ← Qwen3-VL-4B text_config.hidden_size; design doc said 2048 (Qwen2.5)
+    dtype: bf16
+
+  vjepa:
+    n_tokens: 256           # 16x16 patches at img_size=256, patch_size=16
+    hidden_size: 1408       # V-JEPA 2 ViT-g
+
+  sampler:
+    n_tasks: 32
+    n_demos: 8              # batch_size = n_tasks * n_demos = 256
+    seed: 0

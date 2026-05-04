@@ -18,13 +18,13 @@
 - **依赖**：未列出时默认依赖前一编号；跨周依赖必须显式列出
 - **工时单位**：人/小时（`h`）或人/天（`d`），按 1 人独立工作估算
 
-### 0.2 三个关键 Gate
+### 0.2 关键 Gate 与可选检查
 
 | Gate | 时点 | 通过条件 | 不通过回退 |
 |---|---|---|---|
-| ✅ **G-W1** | W1 末 | StarVLA-PI HF ckpt 在 LIBERO-Long 复现成功率 ≥ 86%【**PASS @ 0.9667**，2026-05-03】 | 排查环境/HF/数据；不进 W2 |
+| 🚧 **G-W1** | W1 末 | StarVLA-PI HF ckpt 在 LIBERO-Long 复现成功率 ≥ 86% | 排查环境/HF/数据；不进 W2 |
 | 🚧 **G-W3** | W3 末 | LCLGP best-mode 替代 image goal，V-JEPA 2-AC 在 reach 任务上 ≥ 70% | 回退 K=2 + 仅 end goal，砍 §5.3.1 多模态贡献 |
-| 🚧 **G-W6** | W6 中 | GPT-4V vs 人工抽检的 ETAR 标签一致性 ≥ 80% | 回退 rule-based + 200 chunks 人工 |
+| ⚪ **Q-W6** | W6 中 | learned ETAR 的规则标签经 200 chunks 人工抽检后可用（宏平均准确率 ≥ 80%，且类别分布不过分偏斜） | 放弃 learned ETAR；主线继续使用 rule ETAR + CEM-Light |
 
 ### 0.3 项目目录结构（最终态）
 
@@ -46,7 +46,7 @@ plan-and-verify/                                    # fork 自 starVLA
 │   │   └── ...
 │   ├── deployment/plan_and_verify/                 # ★ 评测 server
 │   ├── training/train_lclgp.py                     # ★ 训练入口
-│   └── training/train_etar.py                      # ★ 训练入口
+│   └── training/train_etar.py                      # ⚪ learned ETAR 训练入口
 ├── examples/PlanAndVerify/                         # ★ 配置 + README
 │   ├── README.md
 │   ├── configs/
@@ -61,7 +61,7 @@ plan-and-verify/                                    # fork 自 starVLA
 │   ├── extract_vjepa_latents.py                    # T-W2.2
 │   ├── build_lclgp_dataset.py                      # T-W2.3
 │   ├── collect_etar_rollouts.py                    # T-W6.1
-│   ├── label_etar.py                               # T-W6.3-4
+│   ├── label_etar.py                               # T-W6.2-4
 │   ├── eval_main.py                                # T-W8
 │   ├── eval_perturb.py                             # T-W9.1
 │   ├── eval_calvin.py                              # T-W10.1
@@ -71,7 +71,7 @@ plan-and-verify/                                    # fork 自 starVLA
 │   ├── latents/                                    # WebDataset 分片
 │   ├── lclgp_dataset/                              # T-W2.3 输出
 │   ├── etar_rollouts/                              # T-W6.1 输出
-│   ├── etar_labeled/                               # T-W6.4 输出
+│   ├── etar_labeled/                               # ⚪ learned ETAR 数据输出
 │   └── eval_logs/                                  # 评测日志
 ├── ckpts/
 │   ├── starvla_pi_libero/                          # HF download
@@ -94,8 +94,8 @@ W2  ──┴─ Latent 缓存 ────────────────�
 W3  ─── LCLGP 训练 ─────────[G-W3]──────── │
 W4  ─── MSFV 验证器 ───────────────────────│
 W5  ─── Runtime + PaV-Lite demo ──────────│
-W6  ─── ETAR 数据 ─────────[G-W6]──────────┘
-W7  ─── ETAR 训练 + CEM-Light ─── PaV-Full
+W6  ─── learned ETAR 数据（可选增强）────────┘
+W7  ─── ETAR-rule + CEM-Light ─── PaV-Full
 W8  ─── LIBERO 主实验 ──── 主对比表
 W9  ─── Perturb + 消融 ─── 第二张表
 W10 ─── CALVIN + openpi + 论文 ─── 交付
@@ -106,16 +106,16 @@ W10 ─── CALVIN + openpi + 论文 ─── 交付
 ```
 W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Runtime
                                         ↓                       ↓
-                                   W3.4 诊断             W6 ETAR data
-                                                              ↓
-                                                          W7 ETAR
+                                   W3.4 诊断             W7 ETAR-rule + CEM
                                                               ↓
                                                           W8 主实验
-                                                          ↓
+                                                              ↓
                                                   W9 Perturb + 消融
-                                                          ↓
+                                                              ↓
                                                   W10 CALVIN/openpi/论文
 ```
+
+W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融，不阻断主线。
 
 ---
 
@@ -175,7 +175,6 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 - [x] **T-W1.3.1** 写 `starVLA/model/modules/world_model/vjepa2.py`
   - **依赖**：T-W1.2.3
   - **要点**：仿 `starVLA/model/modules/world_model/CosmoPredict2.py` 接口；导出 `VJEPA2Encoder`、`VJEPA2ACPredictor`
-  - **W1 简化**：`_VJEPA2_Interface.build_inputs/forward` 仅最小占位，完整实现留 W3 LCLGP（plan W1-R6）
   - **接口签名**：
     ```python
     class VJEPA2Encoder:
@@ -245,67 +244,65 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 
 ### 2.1 数据下载
 
-- [ ] **T-W2.1.1** 下载 LIBERO 全部 4 suite
+- [x] **T-W2.1.1** 下载 LIBERO 全部 4 suite
   - **要点**：T-W1.4.2 已完成 → 跳过
   - **工时**：0
 
 - [ ] **T-W2.1.2** 下载 Bridge-v2（取 50K demo 子集）
-  - **要点**：starVLA 是否原生支持 Bridge-v2？grep `bridge_v2` 在 `datasets/`；不支持则用 OXE 格式 + LeRobot v3 转换
-  - **磁盘**：~200 GB（subset）
-  - **工时**：4 h（多数为下载等待）
+  - **状态**：raw 已下载到 `/mnt/cpfs/zch/assets/BridgeData_V2`（388 GB，OpenDataLab RLDS tfrecord，512 shards）
+  - **决策（W2 sprint）**：W2 主线 LIBERO-only 即可启动 W3 LCLGP（设计文档 §5.4 admit），Bridge-v2 → LeRobot v3 转换 + 50K subset 选择 + 注册 `bridge_widowx` config / `pav_full` mixture 改为旁路任务
+  - **磁盘**：~200 GB（subset）+ 100-300 GB latent
+  - **工时**：4 h
 
 - [ ] ⚪ **T-W2.1.3** 下载 AgiBot World 子集（可选，扩样本量用）
   - **决策点**：W2.4 数据集 ≥ 300K 样本则跳过
 
 ### 2.2 V-JEPA Latent 缓存
 
-- [ ] **T-W2.2.1** 写 `scripts/extract_vjepa_latents.py`
-  - **要点**：sweep starVLA `datasets.vla_data` LeRobot v3 链路；按 `task_id × demo_id × frame_idx` 缓存
-  - **关键参数**：`--patch_grid 16`（720KB/frame）or `--patch_grid 8`（90KB/frame，磁盘紧张时用）
-  - **存储格式**：WebDataset 分片，每片 ~1 GB，便于流式读
-  - **路径**：`data/latents/{dataset}/shard_{idx:06d}.tar`
-  - **工时**：6 h
+- [x] **T-W2.2.1** 写 `scripts/extract_vjepa_latents.py`
+  - **实际**：HDF5 分片代替 WebDataset（starVLA 无 webdataset 依赖；HDF5 + `VJEPALatentShardSet` 提供等价随机访问）
+  - **存储**：`data/latents/<dataset>/<dataset>_rank{NN}.h5`，每 traj 一个 group（`primary`、`wrist`、`lang` attr）
+  - **多 GPU**：`torchrun --nproc_per_node=N` 自动按 `traj % world_size == rank` 分片
 
-- [ ] **T-W2.2.2** 估算磁盘占用
-  - **要点**：500K samples × 3 frames（z_t, z_Δ, z_T）× 720KB ≈ **1.05 TB**
-  - **决策**：磁盘 < 1.5 TB → 改用 patch_grid=8 或流式
-  - **输出**：`docs/data_storage_plan.md`
+- [x] **T-W2.2.2** 估算磁盘占用
+  - **输出**：`docs/data_storage_plan.md`（1.52 TB 全量；LIBERO-only ~340 GB）
 
 - [ ] **T-W2.2.3** 在 8×H200 上跑 latent 抽取
   - **依赖**：T-W2.2.1
-  - **资源**：8×H200 一晚（~10 h）
-  - **验收**：500K × 3 = 1.5M latent 全部缓存；随机抽 100 个 reload 验 sha256
+  - **状态**：driver 脚本就绪 [examples/PlanAndVerify/eval_files/extract_pav_libero.sh](examples/PlanAndVerify/eval_files/extract_pav_libero.sh)；待 GPU 窗口运行
+  - **当前可见**：dryrun shard `data/latents/dryrun/libero_10_no_noops_1.0.0_lerobot/...rank00.h5`（10 trajs，3.5 GB）已校验
+  - **资源**：8×H20 / H200 一夜（~10 h）→ 4 suite 共 ~340 GB
+  - **验收**：4 suite 每个 ~500 demo × ~150 frame × 2 view 全部缓存
 
-- [ ] **T-W2.2.4** 写 latent dataloader
-  - **要点**：`starVLA/datasets/vjepa_latent_dataset.py`；支持 WebDataset；返回 `(text_emb, z_t, z_delta, z_end, task_id)`
-  - **验收**：`pytest tests/data/test_latent_loader.py`
-  - **工时**：3 h
+- [x] **T-W2.2.4** 写 latent dataloader
+  - **入口**：[starVLA/datasets/vjepa_latent_dataset.py](starVLA/datasets/vjepa_latent_dataset.py)
+  - **API**：`VJEPALatentShardSet.get_frame(traj_id, frame_idx) → (256, 1408) fp16`
+  - **验收**：dryrun 上 `iter_trajectories()` 返回 lang + (T, 256, 1408)
 
 ### 2.3 LCLGP 训练样本构造
 
-- [ ] **T-W2.3.1** 写 `scripts/build_lclgp_dataset.py`
-  - **依赖**：T-W2.2.4
-  - **要点**：对每条成功 demo 采样 10 个 (t, t+Δ, T) 三元组；调 starVLA 的 PaliGemma/Qwen 文本 embedder 缓存 `text_emb`
-  - **逻辑**：filter `demo.success == True`，跳过失败 demo
-  - **输出**：`data/lclgp_dataset/{dataset}_{split}.parquet`
-  - **工时**：4 h
+- [x] **T-W2.3.1** 写 `scripts/build_lclgp_dataset.py`
+  - **入口**：[scripts/build_lclgp_dataset.py](scripts/build_lclgp_dataset.py)
+  - **要点**：对每条 demo 采样 10 个 (t, t+Δ, T) 三元组；用 Qwen3-VL-4B-Instruct 的 `model.model.language_model` 计算 text_emb（hidden=2560；设计文档原作 2048 系 Qwen2.5-VL-3B 数字，已修正）
+  - **success 假设**：LeRobot `_no_noops_1.0.0` 数据集已为成功精选；不再单独 filter
+  - **输出**：parquet 索引（`data_name, traj_id, t, t_delta, t_end, lang_hash, length, lang`）+ `text_emb.h5`（lang_hash → [L, 2560] fp16）+ `manifest.json`
+  - **dryrun 验证**：100 三元组、6 unique 任务、text_hidden=2560 全部正确
 
-- [ ] **T-W2.3.2** 划分 train/val/test
-  - **要点**：按 task_id 划，避免任务泄漏；test 占 10%
-  - **验收**：每个任务在 train 至少 5 demo
-  - **工时**：1 h
+- [x] **T-W2.3.2** 划分 train/val/test
+  - **实现**：`stratified_split` 在 build_lclgp_dataset.py 内；按 (lang_hash, traj_id) demo 切；invariant：每 task ≥ 1 train demo（task 全部进 train 以满足 TaskGroupedSampler 约束）
+  - **比例**：80/10/10（小数据时 round-toward-train，避免某 task 不在 train）
+  - **验收**：dryrun 6 任务全部进 train
 
-- [ ] **T-W2.3.3** 写 `TaskGroupedSampler`
-  - **依赖**：T-W2.3.2
-  - **要点**：每 batch 含 32 任务 × 8 demos（batch_size=256）；保证 D1 多模态训练
-  - **验收**：`pytest tests/data/test_grouped_sampler.py`
-  - **工时**：2 h
+- [x] **T-W2.3.3** 写 `TaskGroupedSampler`
+  - **入口**：[starVLA/datasets/samplers.py](starVLA/datasets/samplers.py)
+  - **配套**：[starVLA/datasets/lclgp_triplet_dataset.py](starVLA/datasets/lclgp_triplet_dataset.py) `LcLgpTripletDataset` + `collate_lclgp` 串通 W3 trainer 入口
+  - **验收**：dryrun batch shape `[8, L, 2560]` text_emb / `[8, 256, 1408]` z_*
 
 ### 2.4 数据快照
 
-- [ ] **T-W2.4.1** 数据集统计报告
-  - **输出**：`data/lclgp_dataset/STATS.md`，包含每数据集样本数、任务数、平均 demo 长度
-  - **工时**：1 h
+- [x] **T-W2.4.1** 数据集统计报告
+  - **输出**：`data/lclgp_dataset/<output_dir>/STATS.md`，由 build_lclgp_dataset.py 自动生成；含 per-dataset、per-split、per-task 表 + missing-from-train 警告
+  - **配置**：[examples/PlanAndVerify/configs/lclgp_v1.yaml](examples/PlanAndVerify/configs/lclgp_v1.yaml)（仅 data 段；W3 trainer 接 model/optimizer 段）
 
 ---
 
@@ -570,7 +567,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 
 ---
 
-## W6 — ETAR 数据收集 [🚧 G-W6]（5 d）
+## W6 — learned ETAR 数据收集与校准（⚪ 可选增强，5 d）
 
 ### 6.1 Rollout 收集
 
@@ -586,7 +583,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **预期**：~50% 成功 / ~50% 失败（LIBERO-Long 较难）
   - **验收**：500 trajs 全部完成；记 `success_label, failure_mode_hint`
 
-### 6.2 自动标注
+### 6.2 规则标注 + 人工校准
 
 - [ ] **T-W6.2.1** 写 `scripts/label_etar.py` 自动规则部分
   - **依赖**：T-W6.1.2
@@ -602,47 +599,43 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **要点**：4 类标签分布；理想 EXECUTE 占 60-70%，其他各 10-15%
   - **失败处理**：分布偏斜过严重 → 调阈值或重新平衡
 
-### 6.3 GPT-4V 标注 pilot [🚧 G-W6]
+- [ ] ⚪ **T-W6.2.3** 人工抽检 200 个 chunks
+  - **要点**：覆盖 4 类、多个任务与成功/失败轨迹；检查规则标签是否与视频回放一致
+  - **质量线**：宏平均准确率 ≥ 80%，且无单一类别塌缩
+  - **失败时处理**：不训练 learned ETAR；主线继续用 rule ETAR + CEM-Light
+  - **工时**：4 h
 
-- [ ] **T-W6.3.1** 写 GPT-4V 标注 prompt
-  - **要点**：输入 chunk 时间窗的 5 帧 RGB + 任务指令 + ε 文本，输出 4-class 标签
-  - **prompt 文件**：`scripts/prompts/etar_label.txt`
-  - **工时**：2 h
+### 6.3 全量标注
 
-- [ ] **T-W6.3.2** 抽 1000 个 chunk 跑 pilot
-  - **依赖**：T-W6.2.1, T-W6.3.1
-  - **API 成本**：~$30
-  - **输出**：`data/etar_labeled/pilot_1k.json`
+- [ ] **T-W6.3.1** 全量规则标注 10K chunks
+  - **依赖**：T-W6.2.3 通过；若不通过则跳过 learned ETAR
+  - **要点**：先产出完全不依赖闭源模型的主训练集
+  - **运行**：本地批处理 ~1 h
 
-- [ ] 🚧 **T-W6.3.3** GPT-4V vs 人工抽检 200 个的一致性
-  - **🚧 Gate**：Cohen κ ≥ 0.6（一致性 ≥ 80% 等价）
-  - **失败时回退**：放弃 GPT-4V，全用 rule-based + 200 chunks 人工标
-  - **工时**：人工标 4 h
-
-### 6.4 全量标注
-
-- [ ] **T-W6.4.1** 全量 GPT-4V 跑 10K chunks（如 G-W6 通过）
-  - **依赖**：T-W6.3.3 通过
-  - **API 成本**：~$300
-  - **运行**：API 限流 → 后台跑 ~12 h
-
-- [ ] **T-W6.4.2** 合并 rule + GPT-4V，rule 优先
-  - **要点**：明显 case rule 接管，模糊 case GPT-4V 兜底
+- [ ] **T-W6.3.2** 合并规则标签与人工复核样本
+  - **要点**：明显 case 用 rule；边界 case 用人工复核覆盖
   - **输出**：`data/etar_labeled/full.h5`
   - **工时**：1 h
 
-### 6.5 一致性 + 数据集划分
+### 6.4 一致性 + 数据集划分
 
-- [ ] **T-W6.5.1** train/val 划分
+- [ ] **T-W6.4.1** train/val 划分
   - **要点**：按 traj 划分（不是 chunk），避免泄漏
   - **比例**：80/20
 
-- [ ] **T-W6.5.2** 类别平衡分析
+- [ ] **T-W6.4.2** 类别平衡分析
   - **输出**：`data/etar_labeled/STATS.md`
+
+### 6.5 可选增强：外部 VLM 复核（⚪ 不进入主结果）
+
+- [ ] ⚪ **T-W6.5.1** 用外部 VLM 复核少量模糊 chunks
+  - **要点**：仅用于误差分析或补充讨论；不得作为 ETAR 主数据来源
+  - **输出**：`data/etar_labeled/optional_vlm_audit.json`
+  - **工时**：2-3 h
 
 ---
 
-## W7 — ETAR + CEM-Light（5 d）
+## W7 — ETAR-rule + CEM-Light（5 d）
 
 ### 7.1 StarVLA-PI noise seed 改造
 
@@ -666,30 +659,31 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **要点**：跑 LIBERO-Long 30 trials × 10 任务，对比 T-W1.4.4 的 baseline，应 ±2%
   - **失败处理**：明显退化说明 patch 引入 bug
 
-### 7.2 ETARClassifier
+### 7.2 ETAR rule 主线 + learned ETAR 可选增强
 
-- [ ] **T-W7.2.1** 实现 `ETARClassifier`
+- [ ] **T-W7.2.1** Rule-based ETAR 实现
+  - **入口**：`starVLA/model/framework/PlanVerify/etar.py`
+  - **要点**：实现 §7.2 的阈值规则；阈值通过 W4/W5 诊断数据与成功轨迹误触发率校准
+  - **工时**：3 h
+
+- [ ] ⚪ **T-W7.2.2** 实现 `ETARClassifier`
   - **入口**：`starVLA/model/framework/PlanVerify/etar.py`
   - **结构**：3 层 MLP，~12K 参数
   - **输入**：10 维 features（W4.4.1 的输出）
   - **输出**：4 logits
   - **工时**：2 h
 
-- [ ] **T-W7.2.2** 写 `starVLA/training/train_etar.py`
-  - **依赖**：T-W6.4.2, T-W7.2.1
+- [ ] ⚪ **T-W7.2.3** 写 `starVLA/training/train_etar.py`
+  - **依赖**：T-W6.4.2, T-W7.2.2
   - **要点**：class-balanced cross-entropy；EarlyStopping by val accuracy
   - **资源**：1×4090，~1 h
   - **配置**：`examples/PlanAndVerify/configs/etar_v1.yaml`
 
-- [ ] **T-W7.2.3** 训练 + 选 best ckpt
-  - **依赖**：T-W7.2.2
-  - **🚧 检查**：val accuracy ≥ 75%（4 类，random=25%）
+- [ ] ⚪ **T-W7.2.4** 训练 learned ETAR + 选 best ckpt
+  - **依赖**：T-W7.2.3
+  - **检查**：val accuracy ≥ 75%（4 类，random=25%）
   - **输出**：`ckpts/etar/best.pt`
   - **混淆矩阵**：`paper/tables/etar_confusion.csv`
-
-- [ ] **T-W7.2.4** Rule-based 对照实现
-  - **要点**：实现 §7.2 的阈值规则；阈值通过 train set ROC 选
-  - **工时**：3 h
 
 ### 7.3 CEM-Light
 
@@ -704,10 +698,10 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **目标**：≤ 3 s（设计文档 ~2.8 s）
   - **失败处理**：> 5 s 时降 N=8 或并行 chunk 生成
 
-### 7.4 PaV-Full 集成
+### 7.4 PaV-Full 集成（rule ETAR 主线）
 
 - [ ] **T-W7.4.1** Runtime 接入 ETAR 决策
-  - **依赖**：T-W5.1.1, T-W7.2.3
+  - **依赖**：T-W5.1.1, T-W7.2.1
   - **要点**：替换 T-W5.1.2 的 EXECUTE 占位
   - **工时**：2 h
 
@@ -723,7 +717,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 
 - [ ] **T-W7.5.1** 误触发率验证
   - **依赖**：T-W7.4.3
-  - **要点**：在 baseline 的 100 个成功 trajs 上跑 PaV-Full，统计 RESAMPLE / STOP 触发率
+  - **要点**：在 baseline 的 100 个成功 trajs 上跑 PaV-Full（rule ETAR），统计 RESAMPLE / STOP 触发率
   - **🚧 检查**：成功 traj 上 RESAMPLE 触发率 ≤ 5%；STOP 触发率 ≤ 1%
   - **失败处理**：触发率高 → 调 ETAR 阈值或加 EMA 平滑
 
@@ -743,7 +737,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **数据**：复用
 
 - [ ] **T-W8.1.2** B1 image-goal verifier oracle
-  - **要点**：用 demo 末帧的真 image goal 替换 LCLGP 输出，跑 PaV-Full
+  - **要点**：用 demo 末帧的真 image goal 替换 LCLGP 输出，跑 PaV-Full（rule ETAR）
   - **目的**：上界对比，证明 LCLGP 与 oracle 差距
   - **资源**：1×H100，~6 h
   - **工时**：2 h（实现 + 跑）
@@ -778,12 +772,12 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **依赖**：T-W5.4.1
   - **资源**：1×H100，~6 h
 
-- [ ] **T-W8.2.2** M2 PaV-Rule（M1 + 双 target + episode prog + ETAR-rule）
-  - **依赖**：T-W7.2.4
+- [ ] **T-W8.2.2** M2 PaV-Full（主线完整版：M1 + 双 target + episode prog + ETAR-rule + CEM-Light）
+  - **依赖**：T-W7.5.2
   - **资源**：1×H100，~6 h
 
-- [ ] **T-W8.2.3** M3 PaV-Full（完整版）
-  - **依赖**：T-W7.5.2
+- [ ] ⚪ **T-W8.2.3** M3 PaV-Learned（增强版：M2 + ETAR-learned）
+  - **依赖**：T-W7.2.4, T-W7.5.2
   - **资源**：1×H100，~8 h（含 RESAMPLE 开销）
 
 ### 8.3 主对比表
@@ -794,16 +788,16 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **输出**：`paper/tables/main_libero_long.csv`
 
 - [ ] **T-W8.3.2** LIBERO-Spatial / Object / Goal（不掉点验证）
-  - **要点**：仅 B0 + M3 跑这三 suite，证明 PaV 在中短任务不破坏性能
+  - **要点**：仅 B0 + M2 跑这三 suite，证明 PaV 在中短任务不破坏性能
   - **资源**：8×H200 一夜
   - **输出**：`paper/tables/libero_full.csv`
 
 ### 8.4 显著性分析
 
 - [ ] **T-W8.4.1** Paired bootstrap 显著性
-  - **要点**：B0 vs M3 每对应 trial 配对；10K resample；输出 95% CI
+  - **要点**：B0 vs M2 每对应 trial 配对；10K resample；输出 95% CI
   - **工具**：`scipy.stats.bootstrap`
-  - **🚧 期望**：M3 - B0 ≥ +5pp 在 LIBERO-Long 上 p < 0.01
+  - **🚧 期望**：M2 - B0 ≥ +5pp 在 LIBERO-Long 上 p < 0.01
   - **工时**：2 h
 
 - [ ] **T-W8.4.2** 主表加显著性星号
@@ -839,7 +833,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 
 - [ ] **T-W9.1.6** 主 model 跑 P1-P5
   - **依赖**：T-W9.1.1～5
-  - **范围**：B0 + M3 + B6（WM4A-OFT 对照）
+  - **范围**：B0 + M2 + B6（WM4A-OFT 对照）
   - **trials**：5 任务 × 5 perturb × 30 trials × 3 model = 2250
   - **资源**：8×H200 一夜
   - **输出**：`paper/tables/perturb_recovery.csv`
@@ -863,7 +857,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 - [ ] **T-W9.2.5** w/o ETAR (always EXECUTE)
   - **要点**：替换为 T-W5.1.2 的 EXECUTE 占位
 
-- [ ] **T-W9.2.6** rule ETAR vs learned ETAR
+- [ ] ⚪ **T-W9.2.6** rule ETAR vs learned ETAR
   - **依赖**：T-W7.2.4
 
 - [ ] **T-W9.2.7** w/o CEM-Light（RESAMPLE → re-call π₀ once）
@@ -903,7 +897,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **依赖**：T-W1.2.5
   - **要点**：starVLA `examples/calvin/` 已有 baseline；先跑通他们的 eval
 
-- [ ] **T-W10.1.2** PaV-Full 在 CALVIN ABC-D
+- [ ] **T-W10.1.2** PaV-Full（rule ETAR）在 CALVIN ABC-D
   - **要点**：1000 task sequences
   - **资源**：8×H200 一夜
   - **关注指标**：average length（ABC-D 长程能力的核心指标）
@@ -924,10 +918,10 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
   - **要点**：HTTP/grpc 调 openpi；接口对齐 StarVLA-PI
   - **工时**：4 h
 
-- [ ] **T-W10.2.3** PaV-Full 用 openpi 原版 π₀ 在 LIBERO-Long
+- [ ] **T-W10.2.3** PaV-Full（rule ETAR）用 openpi 原版 π₀ 在 LIBERO-Long
   - **依赖**：T-W10.2.1, T-W10.2.2
   - **要点**：5 任务 × 30 trials = 150 trials；验证趋势一致
-  - **🚧 关注**：PaV 增益符号一致（即 M3 > B0），数值可有差异
+  - **🚧 关注**：PaV 增益符号一致（即 M2 > B0），数值可有差异
   - **资源**：1×H100，~12 h（含 HTTP RTT）
   - **输出**：`paper/tables/openpi_supplementary.csv`
 
@@ -978,7 +972,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 ### 10.5 演示视频
 
 - [ ] **T-W10.5.1** 制作 3 分钟 demo 视频
-  - **内容**：架构图动画 + 失败案例对比（B0 失败 / M3 recovery）+ 诊断图 overlay
+  - **内容**：架构图动画 + 失败案例对比（B0 失败 / M2 recovery）+ 诊断图 overlay
   - **工具**：ffmpeg + manim
   - **输出**：`paper/figures/demo_video.mp4`
   - **工时**：1.5 d
@@ -1007,12 +1001,12 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 | `starVLA/model/framework/PlanVerify/__init__.py` | T-W3.1.5 | Framework 注册 |
 | `starVLA/model/framework/PlanVerify/lclgp.py` | T-W3.1.1 | LCLGP 模型 |
 | `starVLA/model/framework/PlanVerify/msfv.py` | T-W4.1.1 | MSFV verifier |
-| `starVLA/model/framework/PlanVerify/etar.py` | T-W7.2.1 | ETAR 分类器 |
+| `starVLA/model/framework/PlanVerify/etar.py` | T-W7.2.1 | rule ETAR；可选 ETARClassifier |
 | `starVLA/model/framework/PlanVerify/runtime.py` | T-W5.1.1 | Runtime |
 | `starVLA/model/framework/PlanVerify/baselines/cosmo_verifier.py` | T-W9.3.1 | Cosmos 对照 |
 | `starVLA/model/modules/action_model/flow_matching_head/seeded_sample.py` | T-W7.1.2 | noise seed 改造 |
 | `starVLA/training/train_lclgp.py` | T-W3.3.1 | LCLGP 训练入口 |
-| `starVLA/training/train_etar.py` | T-W7.2.2 | ETAR 训练入口 |
+| `starVLA/training/train_etar.py` | T-W7.2.3 | 可选 learned ETAR 训练入口 |
 | `starVLA/clients/pi0_client.py` | T-W10.2.2 | openpi HTTP client |
 | `starVLA/datasets/vjepa_latent_dataset.py` | T-W2.2.4 | Latent dataloader |
 | `starVLA/evaluation/pav_perturb/p1-5_*.py` | T-W9.1.1～5 | Perturb 协议 |
@@ -1033,7 +1027,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 | 配置 | 路径 | 关键参数 |
 |---|---|---|
 | LCLGP 训练 | `examples/PlanAndVerify/configs/lclgp_v1.yaml` | K=4, batch=256, demos_per_task=8, epochs=30 |
-| ETAR 训练 | `examples/PlanAndVerify/configs/etar_v1.yaml` | hidden=64, n_classes=4 |
+| learned ETAR 训练（可选） | `examples/PlanAndVerify/configs/etar_v1.yaml` | hidden=64, n_classes=4 |
 | LIBERO-Long eval | `examples/PlanAndVerify/configs/eval_libero_long.yaml` | trials=30, chunks_per_replan=1 |
 | CALVIN eval | `examples/PlanAndVerify/configs/eval_calvin_abcd.yaml` | sequences=1000 |
 | Perturb eval | `examples/PlanAndVerify/configs/eval_perturb_p{1-5}.yaml` | trials=30 per perturb |
@@ -1051,9 +1045,9 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 | §4 Framework | 全部 framework 代码 | — | T-W10.4.3 |
 | §5 LCLGP | `lclgp.py`, `train_lclgp.py` | D1-D4 诊断 | T-W3.* |
 | §6 MSFV | `msfv.py` | Verifier signal AUC | T-W4.*, T-W5.3.3 |
-| §7 ETAR | `etar.py`, `train_etar.py` | 混淆矩阵 + ROC | T-W7.* |
+| §7 ETAR | `etar.py`; 可选 `train_etar.py` | 误触发率；可选混淆矩阵 + ROC | T-W7.* |
 | §8 Training Recipe | 训练脚本 + configs | — | 各 train_*.py |
-| §9.2 LIBERO 主表 | `eval_main.py` | B0-B6 + M1-M3 | T-W8.* |
+| §9.2 LIBERO 主表 | `eval_main.py` | B0-B6 + M1-M2，M3 可选 | T-W8.* |
 | §9.3 Robustness | `eval_perturb.py` | P1-P5 | T-W9.1.* |
 | §9.4 Ablation | `eval_main.py` 多次 | 9 项消融 | T-W9.2.*, T-W9.3 |
 | §9.4 Cosmos 对照 ★ | `cosmo_verifier.py` | verifier 选型 | T-W9.3.* |
@@ -1070,7 +1064,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 |---|---|---|---|---|
 | R1 | LCLGP 多模态坍缩 | mode_balance.std > 0.5 | 增大 λ_bal、加 mode 间斥力损失 | W3 |
 | R2 | V-JEPA 表征不敏感 | 成功 demo Spearman > -0.3 | 加 SigLIP cross-check verifier | W4 |
-| R3 | GPT-4V 一致性低 | κ < 0.6 | 退到 rule + 200 chunks 人工 | W6 |
+| R3 | learned ETAR 规则标签质量不足 | 人工抽检宏平均准确率 < 80% 或类别明显塌缩 | 跳过 learned ETAR；主线继续 rule ETAR | W6 |
 | R4 | RESAMPLE 误触率高 | 成功 traj 上 > 10% | 调 ETAR 阈值，加 EMA | W7 |
 | R5 | π₀ 在 LIBERO-Long 已饱和 | B0 > 90% | 重心移到 Perturb（未饱和） | W8 |
 | R6 | CALVIN 集成超时 | W10 中段未跑通 | 砍 CALVIN，主结果靠 LIBERO + Perturb | W10 |
@@ -1090,8 +1084,8 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 | Bridge-v2（subset 50K）| HF / OXE | ~200 GB | LCLGP 训练扩展 |
 | V-JEPA latent 缓存 | T-W2.2.3 | ~1.05 TB | LCLGP 训练加速 |
 | LCLGP 三元组 | T-W2.3.1 | ~10 GB | LCLGP 训练 |
-| ETAR rollout | T-W6.1.2 | ~50 GB | ETAR 训练 |
-| ETAR labeled | T-W6.4.2 | ~50 MB | ETAR 训练 |
+| learned ETAR rollout | T-W6.1.2 | ~50 GB | 可选 learned ETAR 训练 |
+| learned ETAR labeled | T-W6.4.2 | ~50 MB | 可选 learned ETAR 训练 |
 
 ### Checkpoints
 | 名称 | 来源 | 大小 | 用途 |
@@ -1101,7 +1095,7 @@ W1.4 baseline ──> W2.2 latent ──> W3 LCLGP ──> W4 MSFV ──> W5 Ru
 | V-JEPA 2-AC predictor | HF facebookresearch/vjepa2 | ~1.2 GB | predictor（frozen）|
 | WM4A CosmoPredict2-OFT | HF `StarVLA/world-model-to-vla` | ~10 GB | B6 对照 |
 | LCLGP best | T-W3.3.4 | ~400 MB | 训练产出 |
-| ETAR best | T-W7.2.3 | ~50 KB | 训练产出 |
+| learned ETAR best | T-W7.2.4 | ~50 KB | 可选训练产出 |
 | LCLGP-Cosmo（ablation）| T-W9.3.2 | ~400 MB | 训练产出 |
 
 ---
@@ -1117,8 +1111,9 @@ python scripts/build_lclgp_dataset.py --config configs/lclgp_v1.yaml
 python -m starVLA.training.train_lclgp --config examples/PlanAndVerify/configs/lclgp_v1.yaml
 python scripts/run_diagnostics.py --ckpt ckpts/lclgp/best.pt        # G-W3 gate
 
+# Optional learned ETAR
 python scripts/collect_etar_rollouts.py --num_trajs 500 --policy starvla_pi_libero
-python scripts/label_etar.py --input data/etar_rollouts/raw_500.h5 --use_gpt4v
+python scripts/label_etar.py --input data/etar_rollouts/raw_500.h5
 python -m starVLA.training.train_etar --config examples/PlanAndVerify/configs/etar_v1.yaml
 
 # Stage 3: 评测
@@ -1142,8 +1137,8 @@ python scripts/run_diagnostics.py --produce_figures --output paper/figures/
 | W3 | LCLGP 训练 + 诊断 | ~30 h | 20 h（训练）|
 | W4 | MSFV | ~20 h | 0 |
 | W5 | Runtime + PaV-Lite | ~22 h | 8 h（demo eval）|
-| W6 | ETAR 数据 | ~25 h | 12 h（rollout + GPT-4V）|
-| W7 | ETAR 训练 + CEM | ~22 h | 1 h |
+| W6 | learned ETAR 数据（可选） | ~25 h | 12 h（rollout + 标注/抽检）|
+| W7 | rule ETAR + CEM | ~22 h | 1 h（可选 learned ETAR 训练）|
 | W8 | LIBERO 主实验 | ~20 h | 一夜 8×H200 |
 | W9 | Perturb + 消融 | ~30 h | 一夜 8×H200 + 24 h LCLGP-Cosmo |
 | W10 | CALVIN + openpi + 论文 | ~50 h | 一夜 8×H200 |

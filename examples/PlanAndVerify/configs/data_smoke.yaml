@@ -1,0 +1,22 @@
+# Plan-and-Verify W2 data smoke config.
+#
+# Purpose: drive `python -m starVLA.dataloader.lerobot_datasets --config_yaml ...`
+# to confirm LeRobot v3 data is reachable and `get_step_data(0,0)` returns a
+# well-formed dict.  No model / training fields needed.
+#
+# Pre-req: PaV registry (examples/PlanAndVerify/train_files/data_registry/data_config.py)
+# is auto-discovered by starVLA/dataloader/gr00t_lerobot/registry.py on first import,
+# which scans examples/*/train_files/data_registry/data_config.py and merges every
+# DATASET_NAMED_MIXTURES / ROBOT_TYPE_CONFIG_MAP / ROBOT_TYPE_TO_EMBODIMENT_TAG it
+# finds. Using the `pav_libero` key below therefore exercises the auto-discovery path.
+
+datasets:
+  vla_data:
+    dataset_py: lerobot_datasets
+    data_root_dir: playground/Datasets/LEROBOT_LIBERO_DATA
+    data_mix: pav_libero
+    action_type: delta_qpos
+    sequential_step_sampling: false
+    per_device_batch_size: 4
+    load_all_data_for_training: true
+    video_backend: torchvision_av
