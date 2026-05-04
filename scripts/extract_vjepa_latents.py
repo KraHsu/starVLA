@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -109,6 +110,20 @@ def normalize_frame(img_uint8: np.ndarray) -> torch.Tensor:
     return (arr - mean) / std
 
 
+def decode_video_ffmpeg(path: str, *, H: int, W: int) -> np.ndarray:
+    # PyAV's bundled libav (60.x/62.x) crashes mid-stream on the LIBERO AV1 mp4s
+    # while system ffmpeg (libav 58.x) decodes them fine. Pipe rgb24 raw frames
+    # out of system ffmpeg and reshape into a (T, H, W, 3) uint8 array.
+    proc = subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-i", path,
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-vf", f"scale={W}:{H}", "-"],
+        check=True, capture_output=True,
+    )
+    frame_bytes = H * W * 3
+    n = len(proc.stdout) // frame_bytes
+    return np.frombuffer(proc.stdout, dtype=np.uint8).reshape(n, H, W, 3).copy()
+
+
 def build_encoder(args) -> VJEPA2Encoder:
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
     enc = VJEPA2Encoder(
@@ -134,46 +149,47 @@ def encode_traj(
     use_wrist: bool,
 ) -> tuple[np.ndarray, np.ndarray | None, str]:
     """Encode every frame of one trajectory. Returns (primary[T,N,D], wrist or None, lang)."""
+    # Language comes from parquet (annotation modality) — populating curr_traj_data
+    # avoids ds.get_step_data, which would re-trigger the video seek path.
+    ds.curr_traj_data = ds.get_trajectory_data(int(traj_id))
+    lang_list = ds.get_language(int(traj_id), "annotation.human.action.task_description", 0)
+    lang = lang_list[0] if lang_list else ""
+
+    primary_path = ds.get_video_path(int(traj_id), "primary_image")
+    primary_frames = decode_video_ffmpeg(str(primary_path), H=img_size, W=img_size)
+    if primary_frames.shape[1] != img_size:
+        raise RuntimeError(
+            f"primary frames came back {primary_frames.shape[1]}px after scale={img_size}; "
+            f"check ffmpeg invocation."
+        )
+
+    wrist_frames: np.ndarray | None = None
+    if use_wrist:
+        wrist_path = ds.get_video_path(int(traj_id), "wrist_image")
+        wrist_frames = decode_video_ffmpeg(str(wrist_path), H=img_size, W=img_size)
+
+    T = min(primary_frames.shape[0], traj_length)
+    if wrist_frames is not None:
+        T = min(T, wrist_frames.shape[0])
+
     primary_chunks: list[np.ndarray] = []
     wrist_chunks: list[np.ndarray] = []
-    lang: str | None = None
-
-    for start in range(0, traj_length, batch_size):
-        end = min(start + batch_size, traj_length)
-        prim_batch = []
-        wrist_batch = []
-        for f in range(start, end):
-            step = ds.get_step_data(traj_id, f)
-            prim_img = step["video.primary_image"][0]  # (H, W, 3) uint8
-            prim_batch.append(normalize_frame(prim_img))
-            if use_wrist and "video.wrist_image" in step:
-                wrist_batch.append(normalize_frame(step["video.wrist_image"][0]))
-            if lang is None:
-                lang_field = step.get("annotation.human.action.task_description", None)
-                if isinstance(lang_field, list):
-                    lang = lang_field[0] if lang_field else ""
-                elif isinstance(lang_field, str):
-                    lang = lang_field
-                else:
-                    lang = ""
-
+    for start in range(0, T, batch_size):
+        end = min(start + batch_size, T)
+        prim_batch = [normalize_frame(primary_frames[f]) for f in range(start, end)]
         prim_tensor = torch.stack(prim_batch).to(device, non_blocking=True)
-        if prim_tensor.shape[-1] != img_size:
-            raise RuntimeError(
-                f"primary image is {prim_tensor.shape[-1]}px but encoder expects {img_size}; "
-                f"add resize logic upstream."
-            )
         z_primary = enc.encode(prim_tensor).float().cpu().numpy().astype(np.float16)
         primary_chunks.append(z_primary)
 
-        if wrist_batch:
+        if wrist_frames is not None:
+            wrist_batch = [normalize_frame(wrist_frames[f]) for f in range(start, end)]
             wrist_tensor = torch.stack(wrist_batch).to(device, non_blocking=True)
             z_wrist = enc.encode(wrist_tensor).float().cpu().numpy().astype(np.float16)
             wrist_chunks.append(z_wrist)
 
     z_primary = np.concatenate(primary_chunks, axis=0)
     z_wrist = np.concatenate(wrist_chunks, axis=0) if wrist_chunks else None
-    return z_primary, z_wrist, lang or ""
+    return z_primary, z_wrist, lang
 
 
 def write_shard(
@@ -254,9 +270,14 @@ def main() -> None:
             print(f"[rank {args.rank}] {data_name}: nothing to do")
             continue
 
-        # Probe wrist availability once via the first sample.
-        probe = ds.get_step_data(int(traj_ids[my_indices[0]]), 0)
-        has_wrist = (not args.no_wrist) and ("video.wrist_image" in probe)
+        # Probe wrist availability without touching the video decoder: check the
+        # modality registry, then confirm the file actually exists for one traj.
+        wrist_registered = "wrist_image" in ds.lerobot_modality_meta.video.keys()
+        has_wrist = (not args.no_wrist) and wrist_registered
+        if has_wrist:
+            sample_traj = int(traj_ids[my_indices[0]])
+            ds.curr_traj_data = ds.get_trajectory_data(sample_traj)
+            has_wrist = Path(ds.get_video_path(sample_traj, "wrist_image")).exists()
 
         records: list[tuple[int, np.ndarray, np.ndarray | None, str]] = []
         t0 = time.time()

@@ -44,7 +44,18 @@ export MASTER_PORT=${MASTER_PORT:-29501}
 
 echo "==> Extracting V-JEPA 2 latents for ${#DATASETS[@]} suites on GPUs [${GPU_CSV}] → ${OUTPUT_DIR}"
 for ds in "${DATASETS[@]}"; do
-    echo "--- $ds ---"
+    # Idempotent: skip a dataset only if every rank shard is already on disk.
+    shard_dir="${OUTPUT_DIR}/${ds}"
+    if [ -d "$shard_dir" ]; then
+        found=$(find "$shard_dir" -maxdepth 1 -name "${ds}_rank*.h5" | wc -l)
+    else
+        found=0
+    fi
+    if [ "$found" -eq "$NUM_GPUS" ]; then
+        echo "--- $ds: $found/$NUM_GPUS shards present, skipping ---"
+        continue
+    fi
+    echo "--- $ds (have $found/$NUM_GPUS shards) ---"
     CUDA_VISIBLE_DEVICES=${GPU_CSV} ${STARVLA_PYTHON} -m torch.distributed.run \
         --nproc_per_node=${NUM_GPUS} \
         --master_addr=${MASTER_ADDR} --master_port=${MASTER_PORT} \
