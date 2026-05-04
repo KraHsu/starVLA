@@ -6,7 +6,7 @@ CKPT_PATH="${2:-}"
 OUT_DIR="${3:-playground/cache/vjepa/vjepa2_1_vit_b_384/libero_goal}"
 NUM_HISTORY_FRAMES="${4:-8}"
 BATCH_SIZE="${5:-8}"
-NUM_WORKERS="${6:-4}"
+NUM_WORKERS="${6:-1}"
 DTYPE="${7:-bf16}"
 MAX_GPU_MEMORY_GB="${8:-100}"
 
@@ -31,11 +31,16 @@ echo "    workers:${NUM_WORKERS}"
 echo "    dtype:  ${DTYPE}"
 echo "    max GPU memory/process: ${MAX_GPU_MEMORY_GB} GiB"
 echo "    logs:   ${LOG_DIR}"
+echo "    thread env: OMP/MKL/OPENBLAS/NUMEXPR=1"
 
 pids=()
 for SHARD_ID in $(seq 0 7); do
   LOG_FILE="${LOG_DIR}/extract_shard_${SHARD_ID}.log"
   echo "==> Launch shard ${SHARD_ID}/${NUM_SHARDS} on CUDA_VISIBLE_DEVICES=${SHARD_ID}; log=${LOG_FILE}"
+  OMP_NUM_THREADS=1 \
+  MKL_NUM_THREADS=1 \
+  OPENBLAS_NUM_THREADS=1 \
+  NUMEXPR_NUM_THREADS=1 \
   CUDA_VISIBLE_DEVICES="${SHARD_ID}" \
     .venv/bin/python examples/PlanAndVerify/cache_files/extract_vjepa_cache.py \
       --config_yaml "${CONFIG_YAML}" \
