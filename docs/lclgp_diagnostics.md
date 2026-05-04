@@ -486,5 +486,99 @@ v3 三处独立证据指向同一机制（repulsive loss 强度过大且与 σ-h
 - v3 retrain（60 epoch / ~0.6h on H20）→ ✅
 - v3 诊断（2/7，回归）→ ✅
 - v3 baseline_table.csv 升级 → ❌（v2 仍是 W3 当前最好；baseline_table 不变）
-- Stage B (G-W3 driver) → ⏳ 等 A/B 决策
-- v4 设计 → ⏳ 仅在用户选 A 时启动
+- v4 设计 + retrain → ✅（详见 §9）
+- Stage B (G-W3 driver) → ⏳ 等 v4 后再判定
+
+---
+
+## 9. v4 retrospective + 路径 A 收益清算 + 结构性发现
+
+**Date**: 2026-05-04
+**Run**: `pav_w3_lclgp_v4` (ckpt `playground/Checkpoints/pav_w3_lclgp_v4/final_model/pytorch_model.pt`)
+**Config**: [examples/PlanAndVerify/configs/lclgp_v4.yaml](../examples/PlanAndVerify/configs/lclgp_v4.yaml)
+**墙钟**: 60 epoch / ~41 min on 8×H20
+**v4 仅在 v3 之上调缓 path B**（架构未动；α 0.5 不动）：
+- λ_rep_max: 0.1 → **0.03**（1/3.3× peak）
+- λ_rep_warmup_steps: 0 → **1200**（前 25% 关闭、随后线性 0→0.03 over 3600 step）
+- bal_temperature_min: 0.1 → **0.3**（softer floor）
+
+### 9.1 v1↔v2↔v3↔v4 7 阈值对比
+
+| # | Metric | Threshold | v1 | v2 | v3 | v4 | v4 Pass | Δ(v4−v3) |
+|---|---|---|---|---|---|---|---|---|
+| 1 | G1_end_min_cos_mean | ≥ 0.75 | 0.213 | 0.799 | 0.862 | **0.795** | ✅ | ↓ 0.067 |
+| 2 | G1_end_sigma_cos_mean | ≥ 0.70 | 0.202 | 0.769 | 0.317 | **0.319** | ❌ | ≈ 0 |
+| 3 | D1-a pairwise cos ∈ [0.30, 0.70] | range | 0.957 | 0.882 | 0.149 | **0.227** | ❌ | ↑ 0.078（向目标区）|
+| 4a | D1-b min mode freq end | ≥ 0.10 | 0.013 | 0.0 | 0.0 | 0.0 | ❌ | 0 |
+| 4b | D1-b min mode freq delta | ≥ 0.10 | 0.0 | 0.0 | 0.0 | 0.0 | ❌ | 0 |
+| 5 | D1-c Pearson(σ, err) | ≥ 0.40 | nan | +0.747 | **−0.818** | **−0.707** | ❌ | \|·\| ↓ 0.111 |
+| 6 | D2-a cf L1 | ≥ 0.05 | 0.740 | 0.319 | 0.162 | **0.104** | ✅ | ↓ 0.058 |
+| 7a | D3-a end specialization gap | ≥ 0.05 | 0.021 | 0.018 | 0.019 | 0.014 | ❌ | ↓ 0.005 |
+| 7b | D3-a delta specialization gap | ≥ 0.05 | 0.004 | 0.009 | 0.008 | 0.005 | ❌ | ↓ 0.003 |
+| **G1_delta_sigma_cos_mean**（次要）| ≥ 0.70 | 0.740 | 0.990 | 0.421 | **0.837** | ✅（次要）| ↑↑ 0.416 |
+
+**通过 2/7（与 v3 持平）；W3 最优仍是 v2 4/7。**
+
+### 9.2 W&B 末段（step 4800）
+
+| 指标 | v2 | v3 | v4 实测 | 评价 |
+|---|---|---|---|---|
+| sigma_end_mean | 1.76 | n/a | 2.95 | 不顶 cap=4.48 ✅ |
+| sigma_delta_mean | 4.48（贴 cap）| n/a | 3.80 | 远离 cap ✅ |
+| **pi_bar_end k=[k0..k3]** | (cov k2=99.6%) | (cov k1=99.9%) | **[0.25, 0.28, 0.23, 0.25]** | softmin 训练时几乎完全均匀 |
+| pi_bar_delta | (cov k2=99.6%) | (cov k1=99.9%) | [0.24, 0.22, 0.23, 0.31] | mode 3 略多但温和 |
+| bal_temperature_current | 1.0 | 0.10 | 0.30 | schedule 终值符合预期 ✅ |
+| lambda_rep_current | 0.0 | 0.10 | 0.030 | schedule 终值符合预期 ✅ |
+| l_bal_end | 0.5 (含 σ) | n/a | 0.002 | softmin 几乎均匀 → KL≈0 |
+| l_recon_end | 0.799 | n/a | 0.936 | 反向上升（同 v2 同因，1 mode 担 4 份）|
+| l_recon_delta | 0.932 | n/a | 0.847 | 略降，delta 头健康 |
+| l_ctr | 3.250 | n/a | 3.157 | 持平 |
+
+### 9.3 v3 → v4 三处独立改善（方向对、幅度不够）
+
+1. **D1-a 0.149 → 0.227**：λ_rep 减弱 0.1→0.03 + warmup 让 σ-head 先稳住 → 没有 v3 的过冲；但 0.227 仍未到 [0.3, 0.7] 下沿（差 0.073）。
+2. **|D1-c Pearson| 0.818 → 0.707**：σ-head 校准部分恢复（绝对值减小 0.111），但**仍负相关**——repulsive 即使 0.03 + 1200 step warmup 也仍反向打 σ-head。
+3. **G1_delta_sigma_cos 0.421 → 0.837**（**次要阈值新通过**）：delta 头 σ 校准完全恢复（v3 跌穿 0.7，v4 远超）；这是 v3 没有的结构性改善——证明 warmup + 减弱 repulsive 在 delta 头侧确实生效，**问题集中在 end 头**。
+
+### 9.4 v4 关键发现 — soft routing / hard argmin 语义错位（结构性问题）
+
+v4 W&B 的 `pi_bar_end k=[0.25, 0.28, 0.23, 0.25]`（4 mode 几乎完全均匀）+ `mode_balance_std_end=0.018`（接近 0）+ `l_bal_end=0.002`（满足）—— **训练时 soft routing 健康**。
+
+但诊断 `D1b_cov_end_k3 = 1.000`——**hindsight argmin 100% 选 mode 3**。
+
+这是一个**语义错位**：
+- L_bal 看的是 `softmin(L1 / bal_T)` 输出的连续概率；当 4 mode 输出微小不同 + bal_T=0.3 温和（不是 v3 的 0.1 sharp）时，softmin 给每个 mode ~25% → KL=0 → l_bal 满足
+- 但诊断 D1-b cov_end 用的是 hindsight `argmin`（取 abs error 最小的那个）——这是硬选择
+- **当 4 mode 输出虽不完全相同但相对差异稳定时，argmin 永远选同一个 mode**（这次是 k3，v2 是 k2，v3 是 k1，winner 旋转但永远只有 1 个）
+
+**这意味着 mode collapse 在 v2/v3/v4 都没真正解决，只是 winner 在 4 个 slot 之间旋转。** L_bal 的 softmin 公式与 hindsight argmin 评估指标之间存在结构性失配——**hparam 微调（温度、权重、warmup）无法解决这个失配**。
+
+#### 9.4.1 三个根因（互相耦合，需架构改）
+
+1. **L_bal 公式缺陷**：softmin 给"4 mode 输出微小不同"的情况近均匀概率，无法区分"真 4-way 分化"与"4 微小变体集中在一处"。
+2. **L_ctr 用 best-mode 输出做正样本**：哪个 mode 先学好就独占 InfoNCE 梯度 → snowball；与 L_bal 形成对抗。
+3. **Hindsight argmin 评估**：D1-b 用真值反查最佳 mode，而训练时模型不知道真值——训练优化的是"4 mode 都接近 GT"（min-of-K），不是"4 mode 互相分化"。
+
+### 9.5 baseline_table 决策
+
+W3 当前最优 ckpt = **v2**（4/7，σ 校准 +0.747，G1 双通过）。`paper/tables/baseline_table.csv` **不升级**。
+
+v3/v4 探索（path B）的成果是结构性诊断（§9.4），不是 W3 阈值升级。
+
+### 9.6 下一步候选
+
+| 选项 | 描述 | 风险 / 收益 |
+|---|---|---|
+| **A2. v5 = 进一步退让 path B** | λ_rep_max 0.03→0.01，warmup 1200→2400（off 50%），bal_T_min 0.3→0.5；纯 hparam 调缓 | 收益小：3 旋钮再调一次最多回到接近 v2（4/7）；σ-head 全恢复，但 mode collapse 仍未解 |
+| **B. 用 v2 当 plan-prior 进 Stage B**（**建议**）| driver 训练只用 plan-prior 输出做 condition，单 mode 也能进；mode-balance 退化为 W3 ablation；推进到 W4 | 低风险：v2 4/7 已知；mode collapse 不直接伤 driver-condition-only 路径；时间预算最划算 |
+| **C. 架构改动（v5 真改）** | 解决 §9.4 三个根因之一：例如 L_bal 改为 hard onehot + entropy；L_ctr 改 sum-of-K 或 random-mode；引入 explicit routing module | 高代价：~1-2 天工作量；正确解但脱离原 design；需重做 G-W3 阈值定义 |
+
+**建议路径 = B**：v3/v4 已验证 path B 的硬上限（§9.3 三个改善信号都在但都不够），结构问题不是 hparam 能解的；继续 W3 死磕回报递减；W4 driver 训练独立于 mode collapse。
+
+### 9.7 截至本报告时间点 (2026-05-04 晚段)
+
+- v4 retrain（~41 min on 8×H20）→ ✅
+- v4 诊断（2/7，与 v3 持平、未击穿 v2 4/7）→ ✅
+- v4 baseline_table.csv 升级 → ❌
+- v4 关键发现：soft routing / hard argmin 语义错位 → 结构性问题（§9.4）
+- 下一步：等用户在 A2 / B / C 间决策（**建议 B**）

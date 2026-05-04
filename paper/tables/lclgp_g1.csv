@@ -1,6 +1,6 @@
 metric,value,threshold,pass
-G1_end_min_cos_mean,0.8623131513595581,0.75,True
-G1_end_min_cos_median,0.8734836578369141,0.75,True
-G1_delta_min_cos_mean,0.8879042267799377,0.75,True
-G1_end_sigma_cos_mean,0.31720784306526184,0.7,False
-G1_delta_sigma_cos_mean,0.4207490384578705,0.7,False
+G1_end_min_cos_mean,0.7953478097915649,0.75,True
+G1_end_min_cos_median,0.7966344952583313,0.75,True
+G1_delta_min_cos_mean,0.9895040392875671,0.75,True
+G1_end_sigma_cos_mean,0.3191181719303131,0.7,False
+G1_delta_sigma_cos_mean,0.8372992277145386,0.7,True

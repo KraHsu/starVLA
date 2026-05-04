@@ -318,6 +318,8 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
 > **v2 retrospective (2026-05-04)**：60 epoch retrain → **4/7 阈值通过**（σ-shortcut 完全切断，但 K=4 mode collapse 是独立新问题）→ 路径 B（v3：bal_T 退火 + repulsive loss）。**当前 W3 最优 ckpt = v2**（baseline_table.csv 锁在 v2）。
 >
 > **v3 retrospective (2026-05-04)**：60 epoch retrain → **2/7 阈值通过（回归）**。λ_rep=0.1 过强：D1-a pairwise cos 0.882→0.149（穿过目标区 [0.3, 0.7] 跌到近正交），D1-c Pearson(σ, err) 0.747→**−0.818** 符号翻转（σ-head 失校准），G1_end_sigma_cos 0.769→0.317（接近随机基线）。**baseline_table.csv 不升级**；下一步 = A（v4 = repulsive 退火 + 减弱）vs B（用 v2 当 plan-prior 进 Stage B），等用户决策。详见 [docs/lclgp_diagnostics.md §8](docs/lclgp_diagnostics.md)。
+>
+> **v4 retrospective (2026-05-04)**：路径 A 完成。60 epoch retrain → **2/7 阈值通过（与 v3 持平、未击穿 v2 4/7）**。三处独立改善：D1-a 0.149→0.227（向目标区移）；|D1-c Pearson| 0.818→0.707（σ-head 部分恢复但仍负相关）；**G1_delta_sigma_cos 0.421→0.837 新通过**（delta 头完全恢复）。但 cov_end k3=100% 仍单 winner（v2 k2=99.6% / v3 k1=99.9% → 只是 winner 旋转）；W&B `pi_bar_end=[0.25, 0.28, 0.23, 0.25]` 训练时均匀 vs 诊断 argmin 单 winner = **soft routing / hard argmin 语义错位**（结构性问题，hparam 无法解；详见 docs §9.4）。**W3 最优仍 v2**；建议下一步 = **B（用 v2 当 plan-prior 进 Stage B）**，等用户确认。详见 [docs/lclgp_diagnostics.md §9](docs/lclgp_diagnostics.md)。
 
 ### 3.1 模型实现
 
@@ -468,10 +470,26 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
   - **决策（按 T-W3.6.3 决策树）**：2/7 ≤ 3 → 重审是否结构问题；当前 W3 最好仍是 v2（4/7），baseline_table.csv **不升级**
   - **详见**：[docs/lclgp_diagnostics.md §8](docs/lclgp_diagnostics.md)
 
-- [ ] **T-W3.6.5** v4 / Stage B 决策（**等用户在 A/B 间二选一**）
-  - **A. v4 = repulsive 退火 + 减弱**：`λ_rep` schedule（前 1200 step 关闭、随后线性增至 `λ_rep_max=0.03`，v3 的 3 折），`bal_temperature_min: 0.3` 不打到 0.1；只动 yaml + 1 处 forward；不动架构 / α
-  - **B. 用 v2 ckpt 当 plan-prior 进 Stage B**：driver 训练只用 plan-prior 输出做 condition，单 mode 也能进；W3 mode-balance 退化为 ablation 议题
-  - **C（保底）**：K=2 简化 → PaV-Lite，仅在 A/B 都失败后启用
+- [x] **T-W3.6.5** v4 retrain（路径 A：λ_rep warmup + 减弱 + softer bal_T floor）
+  - **配置**：`examples/PlanAndVerify/configs/lclgp_v4.yaml`（commit fe3e57e）
+    - `lambda_rep: 0.1 → 0.03`（1/3.3× peak）
+    - `lambda_rep_warmup_steps: 0 → 1200`（NEW；前 25% 关闭、随后线性 0→0.03 over 3600 step）
+    - `bal_temperature_min: 0.1 → 0.3`（softer floor）
+    - 默认值（warmup=0）保持 v3 行为，不影响其他 framework
+  - **代码**：lclgp.py forward 增 `current_lambda_rep` schedule + 新 W&B 字段 `lambda_rep_current`
+  - **smoke**：CPU 通过；step ∈ {0, 600, 1200, 1800, 2400, 3000, 3600, 4200, 4800, 9999} → bal_T schedule 1.0→0.3、λ_rep 0→0.03 with warmup 边界正确；66/66 params 收到非零 grad ✅
+  - **retrain**：8×H20 41 min；step 4800 W&B：sigma_end=2.95, sigma_delta=3.80（远离 cap）, pi_bar_end=[0.25, 0.28, 0.23, 0.25]（softmin 训练时均匀！）, l_bal_end=0.002 ✅
+  - **诊断结果（2026-05-04 完成）**：**2/7 通过**（#1 G1_end_min_cos ✅, #6 D2-a cf L1 ✅）
+    - 三处独立改善：D1-a 0.149→0.227（向 [0.3, 0.7] 移）；|D1-c Pearson| 0.818→0.707；**G1_delta_sigma_cos 0.421→0.837 新通过**（次要阈值）
+    - 三处仍卡死：cov_end k3=100%（winner 又旋转一次）；D1-b 0/0；D1-c 仍负
+  - **关键发现（结构性）**：W&B `pi_bar_end=[0.25, 0.28, 0.23, 0.25]` 训练时 4 mode 均匀 ⊥ 诊断 `cov_end k3=1.000` 硬 argmin 单 winner = **soft routing / hard argmin 语义错位**；hparam 微调（温度 / 权重 / warmup）无法解决；3 个互相耦合的根因（L_bal softmin 弱、L_ctr best-mode 滚雪球、hindsight argmin 评估）需架构改动
+  - **决策**：v4 = 2/7（与 v3 持平、未击穿 v2 4/7）→ baseline_table.csv **不升级**；W3 最优仍 v2
+  - **详见**：[docs/lclgp_diagnostics.md §9](docs/lclgp_diagnostics.md)
+
+- [ ] **T-W3.6.6** Stage B / 架构改动决策（**等用户在 A2 / B / C 间二选一**）
+  - **A2. v5 = 进一步退让 path B**：λ_rep_max 0.03→0.01，warmup 1200→2400（off 50%），bal_T_min 0.3→0.5；预期最多回到接近 v2（4/7），mode collapse 仍未解
+  - **B. 用 v2 ckpt 当 plan-prior 进 Stage B（建议）**：driver 训练用 plan-prior 输出做 condition，单 mode 也能进；W3 mode-balance 议题留 ablation；推进 W4
+  - **C. 架构改动**：解决 §9.4 三根因之一（L_bal hard onehot + entropy / L_ctr sum-of-K / explicit routing module）；~1-2 天，正确解但脱离原 design
 
 ---
 
