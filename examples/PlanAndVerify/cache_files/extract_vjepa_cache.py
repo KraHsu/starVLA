@@ -341,11 +341,12 @@ def extract_episode(
     pooled_chunks = []
     token_chunks = []
     frame_ids = np.arange(trajectory_length, dtype=np.int64)
+    encoder_dtype = next(encoder.parameters()).dtype
 
     for start in range(0, trajectory_length, batch_size):
         base_indices = list(range(start, min(start + batch_size, trajectory_length)))
         batch = prepare_batch_clips(dataset, trajectory_id, base_indices, camera_key, transform, num_workers)
-        batch = batch.to(device=device, non_blocking=(device.type == "cuda"))
+        batch = batch.to(device=device, dtype=encoder_dtype, non_blocking=(device.type == "cuda"))
 
         with torch.inference_mode():
             tokens = encoder(batch)
