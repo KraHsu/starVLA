@@ -482,3 +482,221 @@ sampler into `examples/PlanAndVerify/configs/lclgp_v1.yaml`.
 4. **`d_text=2560`, not 2048**. The number in research_design §5.2 was the
    Qwen2.5-VL-3B figure; Qwen3-VL-4B-Instruct's `text_config.hidden_size`
    is 2560. The W3 LCLGP `text_proj` must use 2560 — `lclgp_v1.yaml` does.
+5. **vjepa2 sdp_kernel FutureWarning**. The vendored
+   `third_party/vjepa2` submodule still wraps `F.scaled_dot_product_attention`
+   in the deprecated `torch.backends.cuda.sdp_kernel()` context manager (7
+   sites). The fix lives in the V-JEPA wrapper
+   `starVLA/model/modules/world_model/vjepa2.py` as a targeted
+   `warnings.filterwarnings` — patching inside the submodule would be reverted
+   by `git submodule update`. The filter is narrow (exact message regex) so
+   unrelated FutureWarnings still surface.
+
+## 12. W3 — LCLGP framework training
+
+W3 has three landed code commits and one blocked stage:
+
+- `dfd393f` — LCLGP framework + losses ([starVLA/model/framework/PlanVerify/lclgp.py](../../starVLA/model/framework/PlanVerify/lclgp.py))
+- `bf32a60` — DDP sampler + trainer + diagnostics
+  ([starVLA/datasets/distributed_task_grouped_sampler.py](../../starVLA/datasets/distributed_task_grouped_sampler.py),
+  [starVLA/training/train_lclgp.py](../../starVLA/training/train_lclgp.py),
+  [examples/PlanAndVerify/scripts/run_diagnostics.py](scripts/run_diagnostics.py),
+  [examples/PlanAndVerify/train_files/run_lclgp.sh](train_files/run_lclgp.sh))
+- `d6dd74a` — Bridge-v2 → LeRobot v2.1 conversion driver (side task; W3 does not depend on it)
+- **Blocked**: full 30-epoch training waits on T-W2.2.3 latent extraction completion (§11.1).
+
+### 12.1 LCLGP standalone smoke (CPU, no data needed)
+
+Verifies the architecture wires up — every parameter receives a non-zero
+gradient on a synthetic batch shaped per the W2 collate contract:
+
+```bash
+.venv/bin/python starVLA/model/framework/PlanVerify/lclgp.py \
+    --config_yaml examples/PlanAndVerify/configs/lclgp_v1.yaml
+```
+
+Expect (full-scale config: d_hidden=1024, n_heads=16, n_layers=4):
+
+```
+forward OK — keys:
+  loss                     ()  torch.float32  ok
+  l_recon_end              ()  torch.float32  ok
+  ...
+backward...
+params with non-zero grad: 114 / 114
+```
+
+### 12.2 DDP smoke on the W2 dryrun shard (1×H20, ~10 s)
+
+End-to-end forward + backward through DeepSpeed Zero-2 + bf16 + the
+`DistributedTaskGroupedSampler`, on the 90-sample / 6-task dryrun set:
+
+```bash
+WANDB_MODE=disabled accelerate launch \
+    --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
+    --num_processes 1 \
+    starVLA/training/train_lclgp.py \
+    --config_yaml examples/PlanAndVerify/configs/lclgp_v1.yaml \
+    --data.lclgp_dataset.index_train data/lclgp_dataset/dryrun/index_train.parquet \
+    --data.lclgp_dataset.text_emb data/lclgp_dataset/dryrun/text_emb.h5 \
+    --data.lclgp_dataset.latent_root data/latents/dryrun \
+    --data.sampler.n_tasks 4 --data.sampler.n_demos 2 \
+    --trainer.max_train_steps 20 --trainer.logging_frequency 5 \
+    --trainer.save_interval 100 --trainer.num_workers 0 \
+    --run_id smoke_lclgp_dryrun
+```
+
+Expected at step 20 (no NaN, all 5 loss components finite):
+
+```
+loss=0.64, l_recon_end=0.39, l_recon_delta=0.51, l_bal_end~1e-4, l_bal_delta~1e-3,
+l_ctr~2.06 (≈ ln(8); InfoNCE not converged on tiny batch),
+l_cf=0.0 (CF diff already ≥ margin; hinge satisfied),
+mode_balance_std_end=5e-3, sigma_end_mean~1.8, sigma_delta_mean~1.1
+```
+
+### 12.3 Real-data 1-epoch quick run (after §11.1 + §11.2 finish)
+
+Quick sanity that the same code path works on the full pav_libero
+parquet/text-emb/latents — about 80 steps on 1×H20 (~7-10 min):
+
+```bash
+WANDB_MODE=disabled bash examples/PlanAndVerify/train_files/run_lclgp.sh \
+    --trainer.max_train_steps 80 \
+    --trainer.logging_frequency 10 \
+    --trainer.save_interval 1000 \
+    --run_id pav_w3_lclgp_1epoch_smoke
+```
+
+Pass criteria:
+- `mode_balance_std_end < 0.5` (default lambda_bal=0.05 should be enough)
+- `l_recon_end` descends below 0.4 by step 80
+- `l_cf` non-trivially nonzero at any point (means CF branch is doing something — exact 0 throughout would mean state-dependence pressure failed)
+
+### 12.4 Full 30-epoch run (8×H20, ~15-20 h)
+
+```bash
+WANDB_ENTITY=<your_entity> bash examples/PlanAndVerify/train_files/run_lclgp.sh
+```
+
+Defaults (overridable from the env at the top of the launcher):
+- `NUM_PROCESSES=8`, `CONFIG_YAML=examples/PlanAndVerify/configs/lclgp_v1.yaml`,
+  `RUN_ROOT_DIR=./playground/Checkpoints`, `RUN_ID=pav_w3_lclgp_v1`,
+  `WANDB_PROJECT=pav-w3-lclgp`.
+- Global batch 256 = `n_tasks=32 × n_demos=8`, sharded over 8 ranks as 4 tasks
+  × 8 demos / rank.
+- LR 5e-4 → 1e-5 cosine, weight_decay 0.05, warmup 200, max_train_steps 2400
+  (≈ 30 epochs at ~80 steps/epoch on the LIBERO 4-suite triplets).
+
+Outputs:
+
+```
+playground/Checkpoints/pav_w3_lclgp_v1/
+├── checkpoints/
+│   ├── steps_400_pytorch_model.pt
+│   ├── steps_800_pytorch_model.pt
+│   ├── ...
+│   └── steps_2400_pytorch_model.pt
+├── final_model/pytorch_model.pt
+├── tb/                                   # TensorBoard event files
+├── wandb/                                # W&B local mirror
+├── config.full.yaml                      # full merged OmegaConf dump
+├── config.yaml                           # AccessTracked-only keys actually read
+└── summary.jsonl                         # one JSON line per checkpoint save
+```
+
+Watch in W&B / TB:
+
+| Metric | What to expect | What to do if not |
+|---|---|---|
+| `loss` | descends monotonically | NaN → lower LR; oscillation → check grad clip |
+| `mode_balance_std_end` / `_delta` | < 0.3 by epoch 5 | persistently ≥ 0.5 → raise `framework.lclgp.loss.lambda_bal` 0.05 → 0.1 |
+| `sigma_end_mean` | ~1-3 after warmup | stuck at exp(5)=148 → lower `loss.log_sigma_max` 5 → 2 |
+| `sigma_delta_mean` | ~1-3 after warmup | same as above |
+| `l_cf` | bouncing in [0.01, 0.05] | exact 0 throughout AND `D2-a` cf-diff < 0.02 later → raise `z_dropout` 0.1 → 0.2 |
+| `l_ctr` | < 1.0 by epoch 10 | stuck near ln(256) ≈ 5.5 → check `gather_fn` actually fired (`accelerator.num_processes > 1`) |
+| `pi_bar_end/k0..k3` histogram | initially uniform, late epochs each 0.10-0.40 | one bin < 0.05 → mode collapsing, raise `lambda_bal` |
+
+### 12.5 G-1, D1abc, D2ab, D3a — auto-eval (after §12.4)
+
+```bash
+CKPT=playground/Checkpoints/pav_w3_lclgp_v1/final_model/pytorch_model.pt   # or best by val L_end
+
+.venv/bin/python examples/PlanAndVerify/scripts/run_diagnostics.py g1 \
+    --config_yaml examples/PlanAndVerify/configs/lclgp_v1.yaml \
+    --checkpoint $CKPT --split val --cuda
+.venv/bin/python examples/PlanAndVerify/scripts/run_diagnostics.py d1 \
+    --config_yaml examples/PlanAndVerify/configs/lclgp_v1.yaml \
+    --checkpoint $CKPT --split val --cuda
+.venv/bin/python examples/PlanAndVerify/scripts/run_diagnostics.py d2 \
+    --config_yaml examples/PlanAndVerify/configs/lclgp_v1.yaml \
+    --checkpoint $CKPT --split val --cuda
+.venv/bin/python examples/PlanAndVerify/scripts/run_diagnostics.py d3 \
+    --config_yaml examples/PlanAndVerify/configs/lclgp_v1.yaml \
+    --checkpoint $CKPT --split val --cuda
+
+# Aggregate all CSVs into docs/lclgp_diagnostics.md
+.venv/bin/python examples/PlanAndVerify/scripts/run_diagnostics.py report \
+    --output_dir paper --docs_dir docs
+```
+
+Pass thresholds (research_design §5.6):
+- G-1 end_min_cos_mean ≥ 0.75, sigma-best ≥ 0.70
+- D1-a mean pairwise mode cosine ∈ [0.30, 0.70]
+- D1-b min mode frequency ≥ 0.10
+- D1-c Pearson(σ, error) ≥ 0.40
+- D2-a mean cf L1 ≥ 0.05
+- D3-a end_specialization_gap ≥ 0.05 and delta_specialization_gap ≥ 0.05
+
+### 12.6 G-W3 gate (V-JEPA 2-AC single-step CEM, 5 LIBERO-Spatial reach tasks)
+
+🚧 **Hard gate**: best-mode SR ≥ 70 % on the 5 simplest LIBERO-Spatial reach tasks.
+
+The `g3` subcommand of `run_diagnostics.py` is currently a printed plan
+(decoder-side V-JEPA 2-AC CEM driver lands in W4 / when the user is ready
+to run it); see §10 of the implementation_todo for the wiring.
+
+### 12.7 Bridge-v2 conversion (side task, not blocking W3)
+
+Three recipes (covered in [examples/PlanAndVerify/scripts/convert_bridge_v2.md](scripts/convert_bridge_v2.md)):
+
+```bash
+# Recommended: pull a community-converted LeRobot mirror, drop in modality.json
+python examples/PlanAndVerify/scripts/convert_bridge_v2.py hf-download \
+    --dst playground/Datasets/bridge_orig_1.0.0_lerobot \
+    --repo IPEC-COMMUNITY/bridge_orig_1.0.0_lerobot
+
+# If you already have a converted dir from elsewhere
+python examples/PlanAndVerify/scripts/convert_bridge_v2.py finalize \
+    --dst /path/to/existing/bridge_lerobot \
+    --symlink-target playground/Datasets/bridge_v2_lerobot
+
+# Raw RLDS → LeRobot (scaffold; intentionally raises with a checklist)
+python examples/PlanAndVerify/scripts/convert_bridge_v2.py from-rlds \
+    --src /mnt/cpfs/zch/assets/BridgeData_V2 \
+    --dst playground/Datasets/bridge_v2_lerobot
+```
+
+After the LeRobot dir exists, uncomment the `bridge_widowx` entries in
+[examples/PlanAndVerify/train_files/data_registry/data_config.py](train_files/data_registry/data_config.py)
+and rerun §11.1 + §11.2 with `--mixture pav_full`.
+
+### 12.8 W3 known fragility
+
+1. **Module-level `Accelerator()` in `train_lclgp.py`**. Means the script
+   *must* be launched via `accelerate launch` even for single-GPU smokes.
+   Calling `python starVLA/training/train_lclgp.py ...` directly will
+   either hang on DDP init or skip DeepSpeed setup entirely.
+2. **DeepSpeed + `batch_sampler`**. Because LCLGP's DataLoader uses a
+   `batch_sampler` (LCLGP's `DistributedTaskGroupedSampler`), Accelerate
+   cannot infer the per-GPU batch size from the loader. The trainer
+   explicitly writes `train_micro_batch_size_per_gpu` into the DeepSpeed
+   plugin config in `prepare_training()` before calling `prepare()`. Do
+   not switch to a plain `Sampler` with `batch_size=N` — the task-grouping
+   invariant must hold per-batch, not per-sample.
+3. **InfoNCE label offset across ranks**. With `gather_fn` enabled, each
+   rank's positives sit at `range(rank*B, rank*B + B)` along the gathered
+   axis. `lclgp.py::_info_nce_loss` reads `gather_fn.rank` (set by
+   `LcLgpTrainer._build_gather_fn`); if you ever swap the gather helper
+   for a stock `accelerator.gather`, set `.rank` manually on the closure
+   or labels will desynchronize and the contrastive loss will train on
+   the wrong positives.

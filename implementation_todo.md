@@ -251,6 +251,7 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
 - [ ] **T-W2.1.2** 下载 Bridge-v2（取 50K demo 子集）
   - **状态**：raw 已下载到 `/mnt/cpfs/zch/assets/BridgeData_V2`（388 GB，OpenDataLab RLDS tfrecord，512 shards）
   - **决策（W2 sprint）**：W2 主线 LIBERO-only 即可启动 W3 LCLGP（设计文档 §5.4 admit），Bridge-v2 → LeRobot v3 转换 + 50K subset 选择 + 注册 `bridge_widowx` config / `pav_full` mixture 改为旁路任务
+  - **转换驱动已就绪**（commit d6dd74a）：[examples/PlanAndVerify/scripts/convert_bridge_v2.py](examples/PlanAndVerify/scripts/convert_bridge_v2.py) + [.md how-to](examples/PlanAndVerify/scripts/convert_bridge_v2.md) — 三路 recipe（hf-download / finalize / from-rlds 桩），用户手动跑
   - **磁盘**：~200 GB（subset）+ 100-300 GB latent
   - **工时**：4 h
 
@@ -267,12 +268,14 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
 - [x] **T-W2.2.2** 估算磁盘占用
   - **输出**：`docs/data_storage_plan.md`（1.52 TB 全量；LIBERO-only ~340 GB）
 
-- [ ] **T-W2.2.3** 在 8×H200 上跑 latent 抽取
+- [ ] **T-W2.2.3** 在 8×H20/H200 上跑 latent 抽取（**等待用户**）
   - **依赖**：T-W2.2.1
   - **状态**：driver 脚本就绪 [examples/PlanAndVerify/eval_files/extract_pav_libero.sh](examples/PlanAndVerify/eval_files/extract_pav_libero.sh)；待 GPU 窗口运行
   - **当前可见**：dryrun shard `data/latents/dryrun/libero_10_no_noops_1.0.0_lerobot/...rank00.h5`（10 trajs，3.5 GB）已校验
+  - **fix**（commit `03d6664`）：`third_party/vjepa2` 7 处用废弃 `torch.backends.cuda.sdp_kernel()` 触发每步 FutureWarning；在 `starVLA/model/modules/world_model/vjepa2.py`（V-JEPA 入口唯一 chokepoint）加精确 `warnings.filterwarnings` —— 只屏蔽这一条，其他 FutureWarning 仍会暴露
   - **资源**：8×H20 / H200 一夜（~10 h）→ 4 suite 共 ~340 GB
   - **验收**：4 suite 每个 ~500 demo × ~150 frame × 2 view 全部缓存
+  - **启动命令**：`bash examples/PlanAndVerify/eval_files/extract_pav_libero.sh`，跑完后 `python scripts/build_lclgp_dataset.py --mixture pav_libero --output-dir data/lclgp_dataset/pav_libero --latent-root data/latents/pav_libero --qwen-vlm playground/Pretrained_models/Qwen3-VL-4B-Instruct --text-dtype bf16`
 
 - [x] **T-W2.2.4** 写 latent dataloader
   - **入口**：[starVLA/datasets/vjepa_latent_dataset.py](starVLA/datasets/vjepa_latent_dataset.py)
@@ -308,93 +311,78 @@ W6 learned ETAR 数据与训练是旁路增强：可用于 M3-Learned / 消融�
 
 ## W3 — LCLGP 模块 [🚧 G-W3]（7 d）
 
+> **W3 落地状态（commits）**：模型 + 损失 `dfd393f` ｜ trainer + DDP sampler + 诊断 `bf32a60` ｜ Bridge-v2 转换驱动 `d6dd74a` ｜ vjepa2 sdp_kernel warning fix `03d6664`. 主线代码全部就绪；卡在 T-W2.2.3 全量抽取 + T-W3.3.4 30-epoch 训练（用户跑），跑完后再做 W3.4 诊断 + G-W3 gate。
+
 ### 3.1 模型实现
 
-- [ ] **T-W3.1.1** 实现 `LCLGP` 类骨架
-  - **入口**：`starVLA/model/framework/PlanVerify/lclgp.py`
-  - **要点**：基于设计文档 §5.2；K=4 多模态 + 不确定性 head
-  - **验收**：`forward` 输出 shape `(z_g_end, z_g_delta, log_sig_end, log_sig_delta)`
-  - **工时**：6 h
+- [x] **T-W3.1.1** 实现 `LCLGP` 类骨架（commit `dfd393f`）
+  - **入口**：[starVLA/model/framework/PlanVerify/lclgp.py](starVLA/model/framework/PlanVerify/lclgp.py)（K=4，d_text=2560，d_latent=1408，d_hidden=1024，n_heads=16，n_layers=4）
+  - **CPU smoke**：`python starVLA/model/framework/PlanVerify/lclgp.py --config_yaml examples/PlanAndVerify/configs/lclgp_v1.yaml` — 满规模 config 114 个 trainable 参数全部收到非零梯度，predict_goal 输出 `[B, 256, 1408]` 与 V-JEPA 2-AC goal 形状一致
 
-- [ ] **T-W3.1.2** 实现 mode embedding + cross-attention（D2 解的结构侧）
-  - **要点**：slot tokens 通过 4 层 `TransformerDecoderLayer`，z_t 作 K/V
-  - **验收**：单元测试 `tests/lclgp/test_attention_routing.py` 验证不同 z_t 输入产生不同输出
-  - **工时**：3 h
+- [x] **T-W3.1.2** 实现 mode embedding + cross-attention（D2 结构侧）（commit `dfd393f`）
+  - **实现**：4 层 `LCLGPDecoderLayer`（self-attn / cross-attn-to-text / cross-attn-to-z_t / FFN），slot tokens 形状 `[K, 256, d_hidden]`，每层带 mode_emb 广播
+  - **mask 约定修正**：W2 collate `text_mask=True=valid`（与 PyTorch `key_padding_mask=True=ignore` 反向），forward 内 `~text_mask` 翻转后再喂给 `nn.MultiheadAttention`
+  - **不复用 [QFormer.py::CrossAttentionBlock](starVLA/model/modules/projector/QFormer.py)**：那个块的 docstring 与实现 mask 语义矛盾；自写 LCLGPDecoderLayer 避坑
 
-- [ ] **T-W3.1.3** 实现 z_t dropout（D2 解的训练侧）
-  - **要点**：训练时 10% 概率把 `z_t` 置零
-  - **验收**：dropout 开启时 forward 不报错；置零时输出仍是合法 shape
-  - **工时**：1 h
+- [x] **T-W3.1.3** 实现 z_t dropout（D2 训练侧）（commit `dfd393f`）
+  - **实现**：训练时 per-batch 单次 Bernoulli (p=0.1) 把 `z_t` 整批置零，再喂 `latent_proj`
 
-- [ ] **T-W3.1.4** 实现 unc head
-  - **要点**：mode-level pool 后投影到 1 维 log_sigma
-  - **工时**：1 h
+- [x] **T-W3.1.4** 实现 unc head（commit `dfd393f`）
+  - **实现**：每个 mode 的 256 个 slot tokens mean-pool → `Linear(d_hidden, 1)` → `log_sigma [B, K]`，clamp 到 `[log_sigma_min=-5, log_sigma_max=5]`
 
-- [ ] **T-W3.1.5** 注册到 `FRAMEWORK_REGISTRY`
-  - **依赖**：T-W3.1.1～4
-  - **要点**：`@FRAMEWORK_REGISTRY.register("PlanVerify_LCLGP")`
-  - **验收**：`build_framework("PlanVerify_LCLGP", config)` 返回正确实例
-  - **工时**：1 h
+- [x] **T-W3.1.5** 注册到 `FRAMEWORK_REGISTRY`（commit `dfd393f`）
+  - **实际名称**：`@FRAMEWORK_REGISTRY.register("LCLGP")`（todo 草案是 `PlanVerify_LCLGP`，PR 时简化为 `LCLGP` —— 短且与同类 framework 名风格一致）
+  - **验收**：`build_framework(cfg with cfg.framework.name="LCLGP")` 通过 base_framework auto-import 扫到 `PlanVerify/` 子包后正确实例化（无需改 `base_framework.py`）
 
 ### 3.2 训练损失
 
-- [ ] **T-W3.2.1** 实现 min-of-K hindsight + 异方差
-  - **要点**：设计文档 §5.3.1 公式；先做 batch 内 [B,K] 距离矩阵，再 min
-  - **验收**：单元测试梯度反传到正确的 mode（手算 case）
-  - **工时**：3 h
+- [x] **T-W3.2.1** min-of-K hindsight + 异方差（commit `dfd393f`）
+  - **实现**：[lclgp.py::_recon_loss](starVLA/model/framework/PlanVerify/lclgp.py)；per-mode = `||z_g - z_true.detach()||_1.mean(N,D) / exp(log_σ) + β·log_σ`，min over K 后取 batch mean，仅 winning mode 反传梯度
 
-- [ ] **T-W3.2.2** 实现 mode-balancing 正则
-  - **要点**：batch 内 mode 选中频率 vs Uniform(K) 的 KL
-  - **验收**：mode 不均衡时 loss > 0；均衡时 ≈ 0
-  - **工时**：1.5 h
+- [x] **T-W3.2.2** mode-balancing 正则（commit `dfd393f`）
+  - **实现**：`softmin(per_mode_loss/T=1.0)` → soft assignment（hard `argmin` 无梯度，故用 softmin 替代设计文档原版 hard count），`pi_bar = soft.mean(B)`，KL 到 Uniform(K)
+  - **同时输出诊断**：`mode_balance_std`（pi_bar 跨 K 的 std）+ hard `mode_argmin` 直方图给 W&B/TB
 
-- [ ] **T-W3.2.3** 实现对比损失
-  - **要点**：InfoNCE on task-level summary（patch-pool + cosine + temp 0.07）
-  - **验收**：单任务 batch loss 应低，跨任务 batch loss 应高
-  - **工时**：2 h
+- [x] **T-W3.2.3** InfoNCE 对比损失（commit `dfd393f`）
+  - **实现**：`mean-pool(z_g_end_best, dim=patches)` vs `mean-pool(z_end, dim=patches)`，τ=0.07
+  - **DDP**：trainer 通过 `gather_fn=accelerator.gather` 把 32-way per-rank 负样本扩到 256-way 全局负样本，本地正样本 label 偏移 `rank * B`
 
-- [ ] **T-W3.2.4** 实现反事实损失（D2 解的训练侧）
-  - **要点**：z_t=0 vs z_t=正常 的最小距离 hinge
-  - **关键**：注意是 **最大化** 差异（反事实分支用 `with torch.no_grad()` 包住）
-  - **工时**：2 h
+- [x] **T-W3.2.4** 反事实损失（D2 训练侧）（commit `dfd393f`）
+  - **实现**：[lclgp.py::_counterfactual_loss](starVLA/model/framework/PlanVerify/lclgp.py)；CF 分支 `with torch.no_grad()` 跑 `z_t=0`，再 `.detach()` 双保险，hinge `clamp(m=0.05 - diff, min=0)`
 
-- [ ] **T-W3.2.5** 总损失组装
-  - **依赖**：T-W3.2.1～4
-  - **要点**：α=0.5, λ_bal=0.05, λ_ctr=0.1, λ_cf=0.05
-  - **输出**：`L, log_dict` 含每分量值（用于 TensorBoard）
-  - **工时**：1 h
+- [x] **T-W3.2.5** 总损失组装（commit `dfd393f`）
+  - **配置**：默认 α=0.5, β=0.1, λ_bal=0.05, λ_ctr=0.1, λ_cf=0.05, τ=0.07, m=0.05；全部 YAML 可覆盖（`framework.lclgp.loss.*`）
+  - **forward 返回**：`{loss, l_recon_end/delta, l_bal_end/delta, l_ctr, l_cf, sigma_*_mean, mode_balance_std_*, mode_argmin_*, pi_bar_*}` —— 标量 detach 后给 trainer 转 `.item()` 喂 W&B + TB
 
 ### 3.3 训练循环
 
-- [ ] **T-W3.3.1** 写 `starVLA/training/train_lclgp.py`
-  - **要点**：复用 starVLA `train_starvlm.py` 模板；接 DeepSpeed Zero-2、bf16
-  - **配置**：`examples/PlanAndVerify/configs/lclgp_v1.yaml`
-  - **工时**：4 h
+- [x] **T-W3.3.1** 写 [`starVLA/training/train_lclgp.py`](starVLA/training/train_lclgp.py)（commit `bf32a60`）
+  - **要点**：仿 `train_starvlm.py` 模板 + 自定义 `_train_step`（吃 `output_dict["loss"]` 而不是 `action_loss`）；DeepSpeed Zero-2 + bf16；显式 set `train_micro_batch_size_per_gpu`（`batch_sampler` 隐藏 batch_size，DeepSpeed 否则会抛错）
+  - **额外产出**：[`starVLA/datasets/distributed_task_grouped_sampler.py`](starVLA/datasets/distributed_task_grouped_sampler.py)（rank-disjoint task slicing，4 tasks × 8 demos / rank → 全局 256）+ [`examples/PlanAndVerify/train_files/run_lclgp.sh`](examples/PlanAndVerify/train_files/run_lclgp.sh)（8×H20 launcher）
+  - **配置**：[examples/PlanAndVerify/configs/lclgp_v1.yaml](examples/PlanAndVerify/configs/lclgp_v1.yaml) 已补 model + trainer + optimizer 段（lr 5e-4, weight_decay 0.05, cosine warmup 200, max_train_steps 2400, save_interval 400, logging_frequency 20）
 
-- [ ] **T-W3.3.2** 写 W&B / TensorBoard 监控
-  - **要点**：记 `L_end`, `L_dlt`, `L_ctr`, `L_cf`, mode_balance.std, sigma.mean
-  - **关键监控指标**：`mode_balance.std < 0.3`（mode 健康活跃）；`L_cf` 收敛到 hinge margin
-  - **工时**：1 h
+- [x] **T-W3.3.2** 写 W&B + TensorBoard 监控（commit `bf32a60`）
+  - **dual log**：rank0 上 `wandb.init(project="pav-w3-lclgp")` + `SummaryWriter(<output>/tb)`；trainer `_log_metrics` 把 forward 返回的所有标量自动同步到两端
+  - **直方图**：每 `logging_frequency × 5` 步发一次 `mode_argmin_end/delta` 的 W&B Histogram + TB add_histogram
 
-- [ ] **T-W3.3.3** 1 epoch quick run on 1×H100
-  - **依赖**：T-W3.3.1
-  - **资源**：1×H100，~40 min
-  - **验收**：loss 下降；mode_balance.std < 0.5
-  - **失败处理**：mode 全部坍缩 → 增大 λ_bal；L_cf 不下降 → 检查反事实分支梯度
+- [x] **T-W3.3.3** 1 epoch quick run on 1×H100（部分完成 — dryrun shard，commit `bf32a60`）
+  - **完成**：1×H20 dryrun shard 20-step smoke（90 sample / 6 task，`accelerate launch --num_processes 1`），10 秒墙钟，DeepSpeed Zero-2 + bf16 工作正常
+  - **观测**：`loss=0.64`、`l_recon_end=0.39`、`l_recon_delta=0.51`、`mode_balance_std=0.005`、`l_cf=0`（自然差异已 ≥ margin）、`l_ctr=2.06≈ln(8)`（小 batch 没收敛）；无 NaN
+  - **真实数据 1-epoch quick run 待跑**（全量 latent 抽取完成后）；预计 ~80 step/epoch，bs=256，1×H20 ≈ 7-10 min
+  - **观察项**：`sigma_delta_mean = 148 = exp(5)` 触上限 — 如果 30-epoch 训练 epoch 5 后还黏在 5，把 `framework.lclgp.loss.log_sigma_max` 调到 2.0 重训
 
-- [ ] **T-W3.3.4** 30 epoch full run on 2×H100
-  - **依赖**：T-W3.3.3
-  - **资源**：2×H100，~20 h
-  - **配置**：lr 5e-4 → 1e-5 cosine；batch 256
-  - **输出**：`ckpts/lclgp/best.pt`（按 val L_end 选）
-  - **工时**：等待时间为主
+- [ ] **T-W3.3.4** 30 epoch full run on 8×H20（**等待用户**）
+  - **依赖**：T-W2.2.3 全量抽取完成
+  - **资源**：8×H20（设计原文 2×H100 ~20h，H20 估 15-20h）
+  - **配置**：lr 5e-4 → 1e-5 cosine；global bs 256（n_tasks=32 × n_demos=8，跨 8 rank 自动分片为 4 tasks × 8 demos / rank）
+  - **启动命令**：`WANDB_ENTITY=<你> bash examples/PlanAndVerify/train_files/run_lclgp.sh`
+  - **输出**：`playground/Checkpoints/pav_w3_lclgp_v1/checkpoints/steps_2400_pytorch_model.pt` + `final_model/pytorch_model.pt`
 
 ### 3.4 D1-D4 诊断（论文 §4.5 基础）
 
-- [ ] **T-W3.4.1** 写 `scripts/run_diagnostics.py`
-  - **依赖**：T-W3.3.4
-  - **要点**：一键跑 §5.6 全部诊断
-  - **工时**：4 h
+- [x] **T-W3.4.1** 写 [`examples/PlanAndVerify/scripts/run_diagnostics.py`](examples/PlanAndVerify/scripts/run_diagnostics.py)（commit `bf32a60`）
+  - **完整功能**：`g1`（min-of-K + best-σ 对 GT 余弦） / `d1`（a/b/c：mode 两两余弦、mode 选中频率、σ-vs-error Pearson）/ `d2`（a/b：CF L1、同 task 跨 start 方差）/ `d3`（a：end↔delta 互换余弦差） / `report`（聚合所有 CSV → `docs/lclgp_diagnostics.md`）
+  - **桩**（依赖外部组件，写有清晰 TODO）：`g2`（V-JEPA 2 decoder）/ `g3`（V-JEPA 2-AC 单步 CEM）/ `d1d`/`d2c`/`d3b`（需重训 ablation ckpt）
 
 - [ ] **T-W3.4.2** G-1 Min-of-K 余弦
   - **验收**：mean ≥ 0.75；< 0.6 触发回炉
