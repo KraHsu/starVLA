@@ -82,3 +82,50 @@ def test_vjepa_framework_config_defaults_merge():
     assert merged.framework.name == "QwenOFT_VJepa"
     assert merged.framework.vjepa.cache_dir == "/tmp/cache"
     assert merged.framework.vjepa.input_dim == 768
+
+
+def test_vjepa_predict_action_returns_trainer_contract():
+    from starVLA.model.framework.VLM4A.QwenOFT_VJepa import QwenOFT_VJepa
+
+    pred_actions = torch.randn(2, 8, 7)
+    model = object.__new__(QwenOFT_VJepa)
+
+    class DummyActionModel:
+        def predict_action(self, _queries):
+            return pred_actions
+
+    class DummyProjector:
+        def __call__(self, pooled):
+            return torch.zeros(2, 4, device=pooled.device, dtype=pooled.dtype)
+
+        def apply_to_queries(self, projected, queries):
+            return queries
+
+    model.action_model = DummyActionModel()
+    model.vjepa_projector = DummyProjector()
+    model.vjepa_cache = None
+    model.chunk_len = 8
+    model.action_token = "x"
+    model.action_token_id = 1
+    model.add_discretized_state_to_instruction = lambda instructions, state: instructions
+    model._load_vjepa_pooled = lambda examples, device, dtype: torch.zeros(2, 3, device=device, dtype=dtype)
+    model._gather_action_token_embeddings = lambda last_hidden, input_ids, action_token_id: torch.zeros(2, 8, 4)
+
+    class DummyQwen:
+        def build_qwenvl_inputs(self, images, instructions):
+            return {"input_ids": torch.ones(2, 16, dtype=torch.long)}
+
+        def __call__(self, **kwargs):
+            return type("Out", (), {"hidden_states": [torch.zeros(2, 16, 4)]})()
+
+    model.qwen_vl_interface = DummyQwen()
+
+    out = model.predict_action(
+        examples=[
+            {"image": [], "lang": "a", "episode_id": 1, "frame_id": 0},
+            {"image": [], "lang": "b", "episode_id": 1, "frame_id": 1},
+        ]
+    )
+
+    assert isinstance(out, dict)
+    assert out["normalized_actions"].shape == (2, 8, 7)

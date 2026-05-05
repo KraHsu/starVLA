@@ -130,7 +130,7 @@ class QwenOFT_VJepa(Qwenvl_OFT):
         self,
         examples: List[dict] = None,
         **kwargs: str,
-    ) -> np.ndarray:
+    ) -> dict:
         if type(examples) is not list:
             examples = [examples]
         batch_images = [example["image"] for example in examples]
@@ -167,4 +167,5 @@ class QwenOFT_VJepa(Qwenvl_OFT):
             action_queries = self.vjepa_projector.apply_to_queries(projected, action_queries)
             pred_actions = self.action_model.predict_action(action_queries)
 
-        return pred_actions.detach().cpu().float().numpy()
+        normalized_actions = pred_actions.detach().cpu().float().numpy()
+        return {"normalized_actions": normalized_actions}
