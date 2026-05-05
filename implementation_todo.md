@@ -55,25 +55,27 @@
 **目标**：复现"没用 V-JEPA"的成绩作为零点。这一阶段**不做任何方法创新**，纯工程。
 
 ### 1.1 数据
-- [ ] 下载 `HuggingFaceVLA/libero`（或 starVLA `examples/LIBERO/` 指定的数据源）
-- [ ] 先只下载 `libero_goal` 一个 suite
-- [ ] 写脚本 `tools/bar/check_libero.py` 验证 `lerobot_datasets.py` 返回字段完整：`image`, `image2`, `state`, `action`, `lang`
+- [x] LIBERO LeRobot 数据：`playground/Datasets/LEROBOT_LIBERO_DATA/`（4 套件本地全部就位，§0.5 已记录；本阶段实际仅用 `libero_goal_no_noops_1.0.0_lerobot`）
+- [x] 数据 sanity 脚本：`examples/PlanAndVerify/cache_files/check_libero.py`（替代 todo 原计划的 `tools/bar/check_libero.py`，因为 `**/bar/` 在 .gitignore；实测 52042 transitions、10 unique task descriptions 全部可达，commit `0fbbd1a`）
 
 ### 1.2 跑通 baseline
-- [ ] 在 8×4090 上跑 **StarVLA-OFT + Florence-2 backbone**（资源友好首选）
-- [ ] 训练步数先开 15k–20k，preview eval 每 1k 步、每任务 2 episode
-- [ ] Final eval：`libero_goal` 10 episode/task
+- [x] **Backbone 替换**：todo 原写 "Florence-2 backbone（4090 资源友好首选）"，实际改为 **`Qwen3-VL-4B-Instruct`**——本机是 8×H20（97 GB/卡）不是 4090，且 Florence-2 framework 在本仓不存在，Qwen3-VL-4B 是 starVLA 官方 LIBERO 例子默认 backbone。
+- [x] 训练 config：`examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml`（QwenOFT + libero_goal + 20k 步 + 8 卡 ZeRO-2，effective batch 128）
+- [x] 训练 launcher：`examples/PlanAndVerify/train_files/run_oft_libero_goal.sh`（10-step DEBUG_STEPS dry-run 已通过，commit `0fbbd1a`）
+- [x] 实际 20k 步训练运行（阶段 E）：`playground/Checkpoints/stage1_oft_libero_goal_20260504_185342/`，8×H20 墙钟约 7.25 h；final ckpt `checkpoints/steps_20000_pytorch_model.pt`，final `action_dit_loss=0.004181030672043562`，`mse_score=0.0011419133682336127`（详见 `examples/PlanAndVerify/BASELINE.md` §4）
+- [ ] ~~Preview eval 每 1k 步、每任务 2 episode~~ —— **不做**。原因：现有 `train_starvla.py:319-351` 的 eval-interval hook 只跑 in-distribution MSE（不是 sim SR），加 sim 评测需要在训练循环里启停 policy server/mujoco env，违反"不改主干"原则。替代方案：训练中看 MSE 收敛；sim eval 只在 final ckpt 上做一次（必要时再补 5k/10k/15k 中间 ckpt 做曲线）。详见 `examples/PlanAndVerify/BASELINE.md` §7。
+- [x] Final eval：`libero_goal` 10 episode/task，final ckpt 评测完成，100 episode 中 98 success（结果目录 `playground/Checkpoints/stage1_oft_libero_goal_20260504_185342/results/libero_goal/`）
 
 ### 1.3 指标记录（后续所有实验都重复这一套）
-- [ ] 平均成功率 SR：per-task & suite-mean
-- [ ] 单卡推理延迟：batch=1，含视觉编码全链路，ms/action chunk
-- [ ] 训练峰值显存：`torch.cuda.max_memory_allocated()`
-- [ ] 训练吞吐：steps/s 与样本/s
+- [x] 平均成功率 SR：per-task & suite-mean 已记录，suite mean **0.98**（98/100），per-task 见 `examples/PlanAndVerify/BASELINE.md` §5；trial 级 CSV：`paper/tables/baseline_oft_libero_goal.csv`
+- [x] 单卡推理延迟基准脚本 + 实测：`examples/PlanAndVerify/eval_files/benchmark_latency.py`，单卡 H20 b=1，5 warmup + 50 step，bf16；mean **88.92 ms/action chunk**，p50 76.54 ms，p95 184.40 ms（源数据 `playground/Checkpoints/stage1_oft_libero_goal_20260504_185342/checkpoints/latency.json`）
+- [x] 训练峰值显存（profile 实测）：**44.4 GB / rank**（peak allocated），56.6 GB / rank（peak reserved）—— 见 `playground/Checkpoints/profile_oft_libero_goal_*/profile.json`
+- [x] 训练吞吐（profile 实测）：**0.79 steps/s**，**101 samples/s**（同上 profile.json）
 
 ### 1.4 阶段 1 交付物
-- [ ] baseline 成绩表（写进 `docs/results/baseline.md`）
-- [ ] tf 日志归档
-- [ ] `BASELINE.md`：commit、seed、卡数、版本号
+- [x] `examples/PlanAndVerify/BASELINE.md`（替代 todo 原计划的 repo 根 `BASELINE.md` 与 `docs/results/baseline.md` —— 沿用 W1 已建立的 PAV 产物约定，与 commits `4ca2c33` / `867c6e2` / `0fbbd1a` 一致）
+- [x] `paper/tables/baseline_oft_libero_goal.csv`（schema 与 W1 `baseline_table.csv` 同：model, task_id, trial_id, success, mp4_path；由 stage1 final eval 生成）
+- [x] 训练日志 / config / ckpt 本地归档完成：`playground/Checkpoints/stage1_oft_libero_goal_20260504_185342/{train.log,config.yaml,config.full.yaml,summary.jsonl,checkpoints/,final_model/}`；本 run 使用 `WANDB_MODE=disabled`，无 WandB 离线目录需要归档
 
 ### 1.5 额外已完成的对照 baseline（StarVLA-PI-Qwen3VL on LIBERO-Long）
 
@@ -311,4 +313,3 @@ trainer:
 - [ ] 阶段 7
 
 也就是：**单套件 `libero_goal` + 三组对照 + 三档数据量 + Failure taxonomy + Rollout strip**，本身就是一个完整故事。其它都是加分项。
-
