@@ -34,17 +34,19 @@ export NCCL_SOCKET_TIMEOUT_MS=${NCCL_SOCKET_TIMEOUT_MS:-360000}
 ###############################################################################
 # === Editable variables ===
 Framework_name=QwenOFT
-freeze_module_list=""
-base_vlm=playground/Pretrained_models/Qwen3-VL-4B-Instruct
-config_yaml=./examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml
-libero_data_root=playground/Datasets/LEROBOT_LIBERO_DATA
-data_mix=libero_goal
-run_root_dir=./playground/Checkpoints
+freeze_module_list="${FREEZE_MODULES:-}"
+base_vlm=${BASE_VLM:-playground/Pretrained_models/Qwen3-VL-4B-Instruct}
+config_yaml=${CONFIG_YAML:-./examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml}
+libero_data_root=${LIBERO_DATA_ROOT:-playground/Datasets/LEROBOT_LIBERO_DATA}
+data_mix=${DATA_MIX:-libero_goal}
+run_root_dir=${RUN_ROOT_DIR:-./playground/Checkpoints}
 RUN_ID=${RUN_ID:-stage1_oft_libero_goal_$(date -u +%Y%m%d_%H%M%S)}
 MAX_TRAIN_STEPS=${MAX_TRAIN_STEPS:-20000}
 PER_DEVICE_BATCH=${PER_DEVICE_BATCH:-16}
 WANDB_ENTITY=${WANDB_ENTITY:-${USER:-anonymous}}
 WANDB_MODE=${WANDB_MODE:-online}
+NUM_PROCESSES=${NUM_PROCESSES:-8}
+SEED=${SEED:-42}
 ###############################################################################
 
 # Smoke-test override: caller sets DEBUG_STEPS=10 to do a 10-step dry run that
@@ -69,9 +71,10 @@ ACCEL_BIN=${ACCEL_BIN:-.venv/bin/accelerate}
 
 ${ACCEL_BIN} launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 8 \
+  --num_processes ${NUM_PROCESSES} \
   starVLA/training/train_starvla.py \
     --config_yaml ${config_yaml} \
+    --seed ${SEED} \
     --framework.name ${Framework_name} \
     --framework.qwenvl.base_vlm ${base_vlm} \
     --datasets.vla_data.data_root_dir ${libero_data_root} \

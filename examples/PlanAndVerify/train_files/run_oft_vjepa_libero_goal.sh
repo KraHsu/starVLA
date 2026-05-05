@@ -26,6 +26,7 @@ PER_DEVICE_BATCH=${PER_DEVICE_BATCH:-16}
 WANDB_ENTITY=${WANDB_ENTITY:-${USER:-anonymous}}
 WANDB_MODE=${WANDB_MODE:-online}
 NUM_PROCESSES=${NUM_PROCESSES:-8}
+SEED=${SEED:-42}
 
 if [[ -n "${DEBUG_STEPS:-}" ]]; then
     MAX_TRAIN_STEPS=${DEBUG_STEPS}
@@ -54,6 +55,7 @@ ${ACCEL_BIN} launch \
   --num_processes ${NUM_PROCESSES} \
   starVLA/training/train_starvla.py \
     --config_yaml ${config_yaml} \
+    --seed ${SEED} \
     --framework.name ${Framework_name} \
     --framework.qwenvl.base_vlm ${base_vlm} \
     --framework.vjepa.cache_dir ${vjepa_cache_dir} \
