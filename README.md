@@ -12,6 +12,8 @@
 <a href="https://github.com/starVLA/starVLA/issues/64#issuecomment-3715403845"><img src="https://img.shields.io/badge/WeChat-加入讨论群-brightgreen?style=for-the-badge&logo=wechat" alt="WeChat"></a>
 </p>
 
+> **Fork note:** This repository is being used on top of the upstream stable `starVLA` branch for a Plan-and-Verify / V-JEPA integration track. The branch-local work lives under [examples/PlanAndVerify](examples/PlanAndVerify), including offline V-JEPA cache extraction, the `QwenOFT_VJepa` framework, and Stage 3 training/eval launchers.
+
 > **📢 Citation Update:** Our technical report is now on arXiv ([2604.05014](https://arxiv.org/abs/2604.05014)). We kindly invite you to use the [updated BibTeX](#citation) for any ongoing or future citations. If you have already cited StarVLA in a previous version of your work, we would greatly appreciate it if you could update the citation entry in your camera-ready or future revisions. Thank you for your understanding and support! 🙏
 
 ---

@@ -17,6 +17,8 @@ config_yaml=${CONFIG_YAML:-./examples/PlanAndVerify/train_files/starvla_oft_vjep
 libero_data_root=${LIBERO_DATA_ROOT:-playground/Datasets/LEROBOT_LIBERO_DATA}
 data_mix=${DATA_MIX:-libero_goal}
 vjepa_cache_dir=${VJEPA_CACHE_DIR:-playground/cache/vjepa/vjepa2_1_vit_b_384/libero_goal}
+vjepa_fusion=${VJEPA_FUSION:-film_gating}
+vjepa_encoder_ckpt=${VJEPA_ENCODER_CKPT:-}
 run_root_dir=${RUN_ROOT_DIR:-./playground/Checkpoints}
 RUN_ID=${RUN_ID:-stage3_oft_vjepa_libero_goal_$(date -u +%Y%m%d_%H%M%S)}
 MAX_TRAIN_STEPS=${MAX_TRAIN_STEPS:-20000}
@@ -40,6 +42,12 @@ cp "$0" "${output_dir}/"
 cp "${config_yaml}" "${output_dir}/"
 
 ACCEL_BIN=${ACCEL_BIN:-.venv/bin/accelerate}
+EXTRA_ARGS=()
+
+if [[ -n "${vjepa_encoder_ckpt}" ]]; then
+    echo "[run_oft_vjepa_libero_goal.sh] using online eval encoder ckpt: ${vjepa_encoder_ckpt}"
+    EXTRA_ARGS+=(--framework.vjepa.encoder_ckpt_path "${vjepa_encoder_ckpt}")
+fi
 
 ${ACCEL_BIN} launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
@@ -49,6 +57,7 @@ ${ACCEL_BIN} launch \
     --framework.name ${Framework_name} \
     --framework.qwenvl.base_vlm ${base_vlm} \
     --framework.vjepa.cache_dir ${vjepa_cache_dir} \
+    --framework.vjepa.fusion ${vjepa_fusion} \
     --datasets.vla_data.data_root_dir ${libero_data_root} \
     --datasets.vla_data.data_mix ${data_mix} \
     --datasets.vla_data.per_device_batch_size ${PER_DEVICE_BATCH} \
@@ -60,4 +69,5 @@ ${ACCEL_BIN} launch \
     --run_root_dir ${run_root_dir} \
     --run_id ${RUN_ID} \
     --wandb_project starVLA_PAV_Stage3 \
-    --wandb_entity ${WANDB_ENTITY}
+    --wandb_entity ${WANDB_ENTITY} \
+    "${EXTRA_ARGS[@]}"

@@ -25,11 +25,11 @@
 
 ### 0.3 新建目录骨架（全部新增，不改主干）
 - [x] `starVLA/model/modules/world_model/vjepa2.py`（W1 产物：`VJEPA2Encoder` + `VJEPA2ACPredictor`，已通过 `world_model/__init__.py` 的 `get_world_model` 工厂注册 `"vjepa2"` 分支 — 替代了原计划的 `model/encoder/vjepa_encoder.py`）
-- [ ] `starVLA/model/modules/projector/vjepa_projector.py`（projector + gating + token 重塑；落在现有 `projector/` 子目录下与 `QFormer.py` 同级）
-- [ ] `starVLA/model/framework/VLM4A/QwenOFT_VJepa.py`（复制 `QwenOFT.py` 后改 forward / predict_action）
-- [ ] `starVLA/config/training/starvla_libero_vjepa.yaml`（在原 LIBERO config 上加 `vjepa_*` 字段）
-- [ ] `examples/PlanAndVerify/cache_files/extract_vjepa_cache.py`（特征离线抽取；与 `examples/PlanAndVerify/eval_files/` 同级，沿用 PAV 子目录约定，追踪进 git）
-- [ ] `examples/PlanAndVerify/train_files/run_vjepa_libero.sh`（实验脚本；同上）
+- [x] `starVLA/model/modules/projector/vjepa_projector.py`（已实现 pooled/token projector，支持 `film_gating | concat_tokens | cross_attn`）
+- [x] `starVLA/model/framework/VLM4A/QwenOFT_VJepa.py`（已落地；训练读离线 cache，LIBERO sim eval 支持在线 V-JEPA fallback）
+- [x] `examples/PlanAndVerify/train_files/starvla_oft_vjepa_libero_goal.yaml`（实际使用 PAV 训练 config，而不是 `starVLA/config/training/` 下新文件）
+- [x] `examples/PlanAndVerify/cache_files/extract_vjepa_cache.py`（已实现并在 H200 上跑完 `libero_goal`）
+- [x] `examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh`（实际 launcher 名称）
 
 ### 0.4 双 uv 环境（项目已统一切到 uv，不再使用 conda）
 - [x] `.venv`：`uv venv --python 3.11 .venv`，starVLA + V-JEPA 2 + flash-attn 主栈
@@ -40,8 +40,8 @@
 
 ### 0.5 数据盘约定
 - [x] `playground/Datasets/` 放原 LeRobot 数据（实际：`playground/Datasets/LEROBOT_LIBERO_DATA/` 已缓存 4 套件 LIBERO LeRobot 数据）
-- [ ] `playground/cache/vjepa/<ckpt_name>/<suite>/` 放 V-JEPA 特征（与 `playground/Datasets`、`playground/Pretrained_models` 风格统一，自动 git-ignore）
-- [ ] `runs/<run_id>/` 放 tf 离线日志 + checkpoint
+- [x] `playground/cache/vjepa/<ckpt_name>/<suite>/` 放 V-JEPA 特征（已落地：`playground/cache/vjepa/vjepa2_1_vit_b_384/libero_goal/`）
+- [x] `playground/Checkpoints/<run_id>/tensorboard/` 放本地 TB 日志；checkpoint 继续沿用 starVLA 现有目录约定
 
 ### 0.6 阶段 0 交付物
 - [ ] fork 链接 + submodule 链接整理在 README（README 暂为 upstream 原文）
@@ -95,27 +95,27 @@
 **目标**：把 V-JEPA forward 完全踢出训练循环，让方案一在 4090 上"白送"。
 
 ### 2.1 抽取脚本
-- [ ] 在 `examples/PlanAndVerify/cache_files/extract_vjepa_cache.py` 实现：
-  - [ ] 遍历 LeRobot dataset，对每个 `(episode_id, frame_id)` 回溯过去 \(N=8\) 或 \(N=16\) 帧
-  - [ ] 送进冻结的 V-JEPA2.1 ViT-B/16 384（首选，80M 参数最省）
-  - [ ] 输出池化向量 \(z \in \mathbb{R}^{D}\)（先做这种，最简单）
-  - [ ] 可选：少量时序 token \(Z \in \mathbb{R}^{K\times D}\)，\(K=4\)（attention pooling 或 stride sample）
-- [ ] 缓存格式：每个 episode 一个 `parquet` 或 `npz`，按 `frame_id` 索引
-- [ ] 写 `index.json` 记录形状、模型 ckpt、\(N\)、\(K\)、归一化均值方差
+- [x] 在 `examples/PlanAndVerify/cache_files/extract_vjepa_cache.py` 实现：
+  - [x] 遍历底层 `LeRobotSingleDataset`，按 `(trajectory_id, frame_id)` 稳定抽取
+  - [x] 送进冻结的 V-JEPA2.1 ViT-B/16 384
+  - [x] 输出池化向量 \(z \in \mathbb{R}^{D}\)
+  - [x] 可选 token 抽取接口（`--save_tokens --num_tokens K`）
+- [x] 缓存格式：每个 episode 一个 `npz`，按 `frame_id` 索引
+- [x] 写 `index.json` 记录形状、模型 ckpt、\(N\)、\(K\)、归一化均值方差
 
 ### 2.2 数据范围
-- [ ] 必做：缓存 `libero_goal` 全部数据
+- [x] 必做：缓存 `libero_goal` 全部数据（H200 实际产物：428 episodes / 52042 frames）
 - [ ] 可选：磁盘允许时再缓存 `libero_10`（长时程套件）
 - [ ] 后置：`libero_spatial` / `libero_object` 留到阶段 4 末尾
 
 ### 2.3 健全性检查（顺便给可解释性章节攒图）
-- [ ] 随机抽 100 帧的特征做 PCA
-- [ ] 看不同任务在低维空间是否可分簇
-- [ ] 保存 PCA 散点图到 `docs/figures/vjepa_pca_sanity.png`
+- [x] 随机抽 100 帧的特征做 PCA
+- [x] 看不同任务在低维空间是否可分簇
+- [x] 保存 PCA 散点图到 `docs/figures/vjepa_pca_sanity.png`
 
 ### 2.4 阶段 2 交付物
-- [ ] 缓存目录 + `index.json`
-- [ ] 一张 PCA 散点图（**直接进毕设可解释性章节**）
+- [x] 缓存目录 + `index.json`
+- [x] 一张 PCA 散点图（**直接进毕设可解释性章节**）
 
 ---
 
@@ -124,23 +124,24 @@
 **目标**：以"新增文件 + config 字段"的方式接入 V-JEPA，**不动 starVLA 主干**。
 
 ### 3.1 Projector 模块
-- [ ] 在 `starVLA/model/modules/projector/vjepa_projector.py` 实现 `VJepaProjector(nn.Module)`：2 层 MLP + LayerNorm，把 \(D_\text{vjepa}\) 投到 VLA hidden size
-- [ ] 三个融合算子并存（开关切换，便于消融）：
-  - [ ] `concat_tokens`：把 \(K\) 个 V-JEPA token 拼到 VLM 视觉 token 序列前
-  - [ ] `film_gating`：用 V-JEPA 池化向量产生 \(\gamma, \beta\)，对 VLA 视觉 token 做 \(\hat{h}=\gamma \odot h+\beta\)
-  - [ ] `cross_attn`：在 action head 前加一层 cross-attn，query 来自 VLA、key/value 来自 V-JEPA token
+- [x] 在 `starVLA/model/modules/projector/vjepa_projector.py` 实现 `VJepaProjector(nn.Module)`：2 层 MLP + LayerNorm，把 \(D_\text{vjepa}\) 投到 VLA hidden size
+- [x] 三个融合算子并存（开关切换，便于消融）：
+  - [x] `concat_tokens`
+  - [x] `film_gating`
+  - [x] `cross_attn`
 
 ### 3.2 Framework 文件
-- [ ] 复制 `starVLA/model/framework/VLM4A/QwenOFT.py` → `starVLA/model/framework/VLM4A/QwenOFT_VJepa.py`
-- [ ] 在 framework 里读缓存（按 starVLA 风格：preprocessing 放 framework 不放 dataloader）
-  - [ ] 根据 `episode_id, frame_id` 从缓存 `mmap` 出 V-JEPA 特征
-  - [ ] 加进 batch dict
-- [ ] 在 forward / predict_action 三处插入 projector 调用
-- [ ] **保持 forward / predict_action 签名不变**
-- [ ] 文件底部写 `__main__` smoke test，单独跑 `python starVLA/model/framework/QwenOFT_VJepa.py --config_yaml ...` 必须能跑通一次 forward
+- [x] 复制 `starVLA/model/framework/VLM4A/QwenOFT.py` → `starVLA/model/framework/VLM4A/QwenOFT_VJepa.py`
+- [x] 在 framework 里读缓存（按 starVLA 风格：preprocessing 放 framework 不放 dataloader）
+  - [x] 根据 `episode_id, frame_id` 从缓存里读 V-JEPA 特征
+  - [x] 训练 sample 已经带 `episode_id / trajectory_id / frame_id`
+- [x] 在 forward / predict_action 两处插入 projector 调用
+- [x] **保持 forward / predict_action 签名不变**
+- [ ] 文件底部 `__main__` 真机 smoke 仍可补；当前以 `tests/plan_and_verify/` + `check_oft_vjepa_setup.py` 作为等价自检入口
+- [x] `predict_action` 在缺少 `episode_id/frame_id` 时支持在线 V-JEPA fallback（LIBERO sim eval 不再被缓存路径阻塞）
 
 ### 3.3 Config
-- [ ] 新建 `starvla_libero_vjepa.yaml`，关键字段：
+- [x] 新建 `examples/PlanAndVerify/train_files/starvla_oft_vjepa_libero_goal.yaml`，关键字段：
 
 ```yaml
 framework:
@@ -158,12 +159,12 @@ trainer:
     action_model: 1.0e-04
 ```
 
-- [ ] 验证 `--trainer.freeze_modules` 真的冻住了对应参数（打印 `requires_grad`）
-- [ ] 验证 `learning_rate.vjepa_projector` 真的在单独的 param group 里
+- [x] 验证 `--trainer.freeze_modules` 真的冻住了对应参数（`tests/plan_and_verify/test_vjepa_train_setup.py` + `check_oft_vjepa_setup.py`）
+- [x] 验证 `learning_rate.vjepa_projector` 真的在单独的 param group 里
 
 ### 3.4 阶段 3 交付物
-- [ ] 一次成功的 single-batch forward+backward 日志
-- [ ] 一张架构图 `docs/figures/architecture.png`（**直接进毕设方法章节**）
+- [x] 一次成功的 single-batch forward+backward 自检入口：`examples/PlanAndVerify/train_files/check_oft_vjepa_setup.py --run_single_batch`
+- [x] 一张架构图 `docs/figures/architecture.png`（**直接进毕设方法章节**）
 
 ---
 

@@ -4,7 +4,10 @@ A "Lego" extension on top of [starVLA](https://github.com/starVLA/starVLA): adds
 
 ## Status
 
-W1 done — env + V-JEPA 2 wrapper + LIBERO-Long baseline. Gate G-W1 result lives in [paper/tables/baseline_table.csv](../../paper/tables/baseline_table.csv).
+- W1 done: env + V-JEPA 2 wrapper + LIBERO-Long baseline. Gate G-W1 result lives in [paper/tables/baseline_table.csv](../../paper/tables/baseline_table.csv).
+- Stage 1 done: `QwenOFT` baseline on `libero_goal`, final eval 98/100. See [BASELINE.md](./BASELINE.md).
+- Stage 2 done: offline V-JEPA cache extractor + PCA sanity plot.
+- Stage 3 in progress: `QwenOFT_VJepa`, TensorBoard logging, offline cache training path, and online LIBERO eval fallback.
 
 ## Environments
 
@@ -72,3 +75,77 @@ Pass criterion: LIBERO-Long mean success rate ≥ 0.86.
 
 Four tests; the two GPU-bound ones load V-JEPA 2 ViT-g with random weights and run a
 forward pass (~40 s on H20).
+
+## Stage 2 cache extraction
+
+Single-card smoke:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python examples/PlanAndVerify/cache_files/extract_vjepa_cache.py \
+  --config_yaml examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml \
+  --dataset_name libero_goal \
+  --camera_key video.primary_image \
+  --vjepa_ckpt /path/to/vjepa2_1_vitb_dist_vitG_384.pt \
+  --output_dir playground/cache/vjepa/vjepa2_1_vit_b_384/libero_goal \
+  --num_history_frames 8 \
+  --batch_size 8 \
+  --num_workers 4 \
+  --device cuda:0 \
+  --dtype bf16 \
+  --max_episodes 1
+```
+
+PCA sanity:
+
+```bash
+.venv/bin/python examples/PlanAndVerify/cache_files/extract_vjepa_cache.py \
+  --config_yaml examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml \
+  --dataset_name libero_goal \
+  --camera_key video.primary_image \
+  --output_dir playground/cache/vjepa/vjepa2_1_vit_b_384/libero_goal \
+  --run_pca_sanity \
+  --pca_num_samples 100
+```
+
+## Stage 3 training and checks
+
+Training launcher:
+
+```bash
+WANDB_MODE=disabled bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
+```
+
+Useful overrides:
+
+```bash
+DEBUG_STEPS=200 WANDB_MODE=disabled bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
+VJEPA_FUSION=cross_attn WANDB_MODE=disabled bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
+VJEPA_ENCODER_CKPT=/path/to/vjepa2_1_vitb_dist_vitG_384.pt WANDB_MODE=disabled bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
+```
+
+TensorBoard:
+
+```bash
+.venv/bin/tensorboard --logdir playground/Checkpoints --host 0.0.0.0 --port 6006
+```
+
+Setup checks:
+
+```bash
+.venv/bin/python examples/PlanAndVerify/train_files/check_oft_vjepa_setup.py \
+  --config_yaml examples/PlanAndVerify/train_files/starvla_oft_vjepa_libero_goal.yaml
+```
+
+Real single-batch check:
+
+```bash
+.venv/bin/python examples/PlanAndVerify/train_files/check_oft_vjepa_setup.py \
+  --config_yaml examples/PlanAndVerify/train_files/starvla_oft_vjepa_libero_goal.yaml \
+  --run_single_batch
+```
+
+Notes:
+
+- Training reads `episode_id/frame_id` from the LeRobot sample and pulls pooled V-JEPA features from the cache.
+- LIBERO sim eval does not have those ids. `QwenOFT_VJepa.predict_action()` now falls back to an online V-JEPA encoder using a rolling history of the primary view.
+- If `framework.vjepa.encoder_ckpt_path` is left null, the framework auto-discovers it from `cache_dir/index.json`.

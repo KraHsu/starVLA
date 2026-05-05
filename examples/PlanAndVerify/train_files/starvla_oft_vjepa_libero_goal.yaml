@@ -22,7 +22,15 @@ framework:
     cache_dir: playground/cache/vjepa/vjepa2_1_vit_b_384/libero_goal
     input_dim: 768
     projector_hidden_dim: 2048
-    use_film_gating: true
+    fusion: film_gating            # film_gating | concat_tokens | cross_attn
+    use_film_gating: true          # backward-compatible alias for the default mode
+    num_attention_heads: 8
+    online_eval_fallback: true     # no episode_id/frame_id in LIBERO sim eval -> run encoder online
+    encoder_ckpt_path: null        # null => auto-discover from cache_dir/index.json checkpoint_path
+    num_history_frames: 8
+    img_size: 384
+    dtype: bf16
+    primary_camera_index: 0
 
 datasets:
   vla_data:

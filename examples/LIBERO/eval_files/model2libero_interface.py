@@ -46,6 +46,8 @@ class ModelClient:
         self.sticky_gripper_action = 0.0
         self.previous_gripper_action = None
 
+        self._reset_policy_history_next_step = True
+
         self.task_description = None
         self.image_history = deque(maxlen=self.horizon)
         if self.action_ensemble:
@@ -90,6 +92,9 @@ class ModelClient:
 
         images = [self._resize_image(image) for image in images]
         example["image"] = images
+        if self._reset_policy_history_next_step:
+            example["vjepa_reset_history"] = True
+            self._reset_policy_history_next_step = False
         vla_input = {
             "examples": [example],
             "do_sample": False,

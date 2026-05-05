@@ -1,9 +1,10 @@
 from pathlib import Path
-from types import SimpleNamespace
+from collections import deque
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+from PIL import Image
 
 from starVLA.model.modules.projector.vjepa_projector import VJepaProjector
 from starVLA.dataloader.vjepa_cache import VJepaFeatureCache
@@ -55,6 +56,41 @@ def test_vjepa_projector_shapes():
     assert fused.shape == (2, 8, 2048)
 
 
+def test_vjepa_projector_token_fusion_modes():
+    pooled = torch.randn(2, 768)
+    tokens = torch.randn(2, 4, 768)
+    queries = torch.randn(2, 8, 256)
+
+    concat_projector = VJepaProjector(
+        input_dim=768,
+        output_dim=256,
+        hidden_dim=512,
+        fusion="concat_tokens",
+        num_attention_heads=8,
+    )
+    cross_attn_projector = VJepaProjector(
+        input_dim=768,
+        output_dim=256,
+        hidden_dim=512,
+        fusion="cross_attn",
+        num_attention_heads=8,
+    )
+
+    concat_out = concat_projector.apply_to_queries(
+        concat_projector(pooled),
+        queries,
+        projected_tokens=concat_projector(tokens),
+    )
+    cross_attn_out = cross_attn_projector.apply_to_queries(
+        cross_attn_projector(pooled),
+        queries,
+        projected_tokens=cross_attn_projector(tokens),
+    )
+
+    assert concat_out.shape == queries.shape
+    assert cross_attn_out.shape == queries.shape
+
+
 def test_vjepa_cache_batch_for_framework(tmp_path: Path):
     _write_vjepa_cache(tmp_path)
     cache = VJepaFeatureCache(tmp_path)
@@ -98,7 +134,7 @@ def test_vjepa_predict_action_returns_trainer_contract():
         def __call__(self, pooled):
             return torch.zeros(2, 4, device=pooled.device, dtype=pooled.dtype)
 
-        def apply_to_queries(self, projected, queries):
+        def apply_to_queries(self, projected, queries, projected_tokens=None):
             return queries
 
     model.action_model = DummyActionModel()
@@ -129,3 +165,60 @@ def test_vjepa_predict_action_returns_trainer_contract():
 
     assert isinstance(out, dict)
     assert out["normalized_actions"].shape == (2, 8, 7)
+
+
+def test_vjepa_online_clip_reset_and_padding():
+    from starVLA.model.framework.VLM4A.QwenOFT_VJepa import QwenOFT_VJepa
+
+    model = object.__new__(QwenOFT_VJepa)
+    model.vjepa_primary_camera_index = 0
+    model.vjepa_num_history_frames = 4
+    model.vjepa_img_size = 16
+    model.vjepa_frame_history = deque(maxlen=4)
+    model._vjepa_last_task_id = None
+
+    img0 = Image.fromarray(np.zeros((12, 12, 3), dtype=np.uint8))
+    img1 = Image.fromarray(np.full((12, 12, 3), 127, dtype=np.uint8))
+
+    clip0 = model._build_online_clip({"image": [img0, img0], "lang": "task-a"})
+    assert clip0.shape == (3, 4, 16, 16)
+    assert len(model.vjepa_frame_history) == 1
+
+    _ = model._build_online_clip({"image": [img1, img1], "lang": "task-a"})
+    assert len(model.vjepa_frame_history) == 2
+
+    clip_reset = model._build_online_clip({"image": [img1, img1], "lang": "task-a", "vjepa_reset_history": True})
+    assert clip_reset.shape == (3, 4, 16, 16)
+    assert len(model.vjepa_frame_history) == 1
+
+
+def test_vjepa_online_pooled_fallback_uses_encoder_output():
+    from starVLA.model.framework.VLM4A.QwenOFT_VJepa import QwenOFT_VJepa
+
+    class DummyEncoder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+        def forward(self, batch):
+            pooled = batch.mean(dim=(2, 3, 4))
+            return pooled.unsqueeze(1).repeat(1, 2, 1)
+
+    model = object.__new__(QwenOFT_VJepa)
+    model.vjepa_primary_camera_index = 0
+    model.vjepa_num_history_frames = 4
+    model.vjepa_img_size = 8
+    model.vjepa_frame_history = deque(maxlen=4)
+    model._vjepa_last_task_id = None
+    model.vjepa_dtype_name = "fp32"
+    model._get_online_vjepa_encoder = lambda device: DummyEncoder().to(device=device)
+
+    image = Image.fromarray(np.full((10, 10, 3), 255, dtype=np.uint8))
+    pooled = model._load_vjepa_pooled_online(
+        [{"image": [image, image], "lang": "task-b", "vjepa_reset_history": True}],
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    assert pooled.shape == (1, 3)
+    assert torch.isfinite(pooled).all()
