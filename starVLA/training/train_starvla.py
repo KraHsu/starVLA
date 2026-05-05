@@ -28,6 +28,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from transformers import AutoProcessor, get_scheduler
 
@@ -141,6 +142,7 @@ class VLATrainer(TrainerUtils):
             self.vla_train_dataloader,
         )
 
+        self._init_tensorboard()
         self._init_wandb()
 
     def _calculate_total_batch_size(self):
@@ -153,7 +155,8 @@ class VLATrainer(TrainerUtils):
 
     def _init_wandb(self):
         """Initialize Weights & Biases."""
-        if self.accelerator.is_main_process:
+        self.wandb_enabled = os.getenv("WANDB_MODE", "online").lower() != "disabled"
+        if self.accelerator.is_main_process and self.wandb_enabled:
             wandb.init(
                 name=self.config.run_id,
                 dir=os.path.join(self.config.output_dir, "wandb"),
@@ -161,6 +164,18 @@ class VLATrainer(TrainerUtils):
                 entity=self.config.wandb_entity,
                 group="vla-train",
             )
+        elif self.accelerator.is_main_process:
+            logger.info("WANDB_MODE=disabled -> skipping wandb init")
+
+    def _init_tensorboard(self):
+        """Initialize local TensorBoard logging."""
+        self.tb_writer = None
+        if not self.accelerator.is_main_process:
+            return
+        tb_dir = os.path.join(self.config.output_dir, "tensorboard")
+        os.makedirs(tb_dir, exist_ok=True)
+        self.tb_writer = SummaryWriter(log_dir=tb_dir)
+        logger.info(f"TensorBoard logs will be written to {tb_dir}")
 
     def _save_initial_configs(self):
         """Save full config and training script at the very start of training."""
@@ -264,7 +279,13 @@ class VLATrainer(TrainerUtils):
         if self.completed_steps % self.config.trainer.logging_frequency == 0 and dist.get_rank() == 0:
             metrics["learning_rate"] = self.lr_scheduler.get_last_lr()[0]
             metrics["epoch"] = round(self.completed_steps / len(self.vla_train_dataloader), 2)
-            wandb.log(metrics, step=self.completed_steps)
+            if self.tb_writer is not None:
+                for key, value in metrics.items():
+                    if isinstance(value, (int, float)):
+                        self.tb_writer.add_scalar(key, value, self.completed_steps)
+                self.tb_writer.flush()
+            if getattr(self, "wandb_enabled", False):
+                wandb.log(metrics, step=self.completed_steps)
             logger.info(f"Step {self.completed_steps}, Loss: {metrics})")
 
     def _create_data_iterators(self):
@@ -398,7 +419,11 @@ class VLATrainer(TrainerUtils):
                 raise ValueError(f"Unsupported save_format `{save_format}`. Expected `pt` or `safetensors`.")
             logger.info(f"Training complete. Final model saved at {final_checkpoint}")
 
-        if self.accelerator.is_main_process:
+        if self.accelerator.is_main_process and self.tb_writer is not None:
+            self.tb_writer.flush()
+            self.tb_writer.close()
+
+        if self.accelerator.is_main_process and getattr(self, "wandb_enabled", False):
             wandb.finish()
 
         self.accelerator.wait_for_everyone()
