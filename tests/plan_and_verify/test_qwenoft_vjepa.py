@@ -120,6 +120,17 @@ def test_vjepa_framework_config_defaults_merge():
     assert merged.framework.vjepa.input_dim == 768
 
 
+def test_vjepa_encoder_ckpt_path_prefers_env(monkeypatch):
+    from starVLA.model.framework.VLM4A.QwenOFT_VJepa import QwenOFT_VJepa
+
+    model = object.__new__(QwenOFT_VJepa)
+    model.vjepa_cache = type("Cache", (), {"index": {"checkpoint_path": "/tmp/from-index.pt"}})()
+
+    monkeypatch.setenv("VJEPA_ENCODER_CKPT", "/tmp/from-env.pt")
+
+    assert model._resolve_vjepa_encoder_ckpt_path({"encoder_ckpt_path": "/tmp/from-config.pt"}) == "/tmp/from-env.pt"
+
+
 def test_vjepa_predict_action_returns_trainer_contract():
     from starVLA.model.framework.VLM4A.QwenOFT_VJepa import QwenOFT_VJepa
 

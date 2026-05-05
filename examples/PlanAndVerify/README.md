@@ -7,7 +7,7 @@ A "Lego" extension on top of [starVLA](https://github.com/starVLA/starVLA): adds
 - W1 done: env + V-JEPA 2 wrapper + LIBERO-Long baseline. Gate G-W1 result lives in [paper/tables/baseline_table.csv](../../paper/tables/baseline_table.csv).
 - Stage 1 done: `QwenOFT` baseline on `libero_goal`, final eval 98/100. See [BASELINE.md](./BASELINE.md).
 - Stage 2 done: offline V-JEPA cache extractor + PCA sanity plot.
-- Stage 3 in progress: `QwenOFT_VJepa`, TensorBoard logging, offline cache training path, and online LIBERO eval fallback.
+- Stage 3 training accepted: `QwenOFT_VJepa` full H200 run `stage3_oft_vjepa_libero_goal_20260505_042345` completed 20k steps with final `action_dit_loss=0.0041139610` and `mse_score=0.0011409129`; online LIBERO eval fallback is implemented and pending sim SR.
 
 ## Environments
 
@@ -109,6 +109,17 @@ PCA sanity:
 
 ## Stage 3 training and checks
 
+Accepted full run:
+
+| Field | Value |
+|-------|-------|
+| Run id | `stage3_oft_vjepa_libero_goal_20260505_042345` |
+| Final checkpoint | `playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/final_model/pytorch_model.pt` |
+| Intermediate checkpoints | `checkpoints/steps_5000_pytorch_model.pt`, `steps_10000_pytorch_model.pt`, `steps_15000_pytorch_model.pt`, `steps_20000_pytorch_model.pt` |
+| Config | `playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/config.yaml` and `config.full.yaml` |
+| TensorBoard | `playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/tensorboard/` |
+| Final train metrics | `action_dit_loss=0.0041139610`, `mse_score=0.0011409129` |
+
 Training launcher:
 
 ```bash
@@ -143,6 +154,18 @@ Real single-batch check:
   --config_yaml examples/PlanAndVerify/train_files/starvla_oft_vjepa_libero_goal.yaml \
   --run_single_batch
 ```
+
+LIBERO sim eval smoke for the accepted Stage 3 checkpoint:
+
+```bash
+CKPT=playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/final_model/pytorch_model.pt \
+TASK_SUITE=libero_goal NUM_TRIALS=1 GPU_LIST="0" \
+bash examples/PlanAndVerify/eval_files/eval_libero_long_multi_gpu.sh
+```
+
+Full `libero_goal` eval uses the same command with `NUM_TRIALS=10` or `NUM_TRIALS=30`.
+Results are written under `playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/results/libero_goal/`.
+If online encoder discovery fails, set `VJEPA_ENCODER_CKPT=/path/to/vjepa2_1_vitb_dist_vitG_384.pt` and rerun.
 
 Notes:
 

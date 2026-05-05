@@ -133,6 +133,9 @@ class QwenOFT_VJepa(Qwenvl_OFT):
         return torch.from_numpy(pooled_np).to(device=device, dtype=dtype)
 
     def _resolve_vjepa_encoder_ckpt_path(self, vjepa_cfg) -> str | None:
+        env_ckpt_path = os.environ.get("VJEPA_ENCODER_CKPT")
+        if env_ckpt_path:
+            return os.fspath(env_ckpt_path)
         ckpt_path = vjepa_cfg.get("encoder_ckpt_path", None)
         if ckpt_path:
             return os.fspath(ckpt_path)

@@ -8,6 +8,7 @@
 #   BASE_PORT=6694       default: 6694 (each GPU gets BASE_PORT + idx)
 #   NUM_TRIALS=30        default: 30
 #   TASK_SUITE=libero_10 default: libero_10
+#   CKPT=/path/to/model.pt default: published StarVLA LIBERO-Long ckpt
 #   READY_TIMEOUT=180    default: 180  (seconds to wait per server load)
 set -e
 
@@ -15,7 +16,8 @@ STARVLA_DIR=$(pwd)
 STARVLA_PYTHON=${STARVLA_DIR}/.venv/bin/python
 LIBERO_PYTHON=${STARVLA_DIR}/.venv-libero/bin/python
 
-CKPT=${STARVLA_DIR}/playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
+DEFAULT_CKPT=${STARVLA_DIR}/playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
+CKPT=${CKPT:-$DEFAULT_CKPT}
 SERVER_SCRIPT=deployment/model_server/server_policy.py
 CLIENT_SCRIPT=examples/PlanAndVerify/eval_files/eval_libero_long_sharded.py
 
@@ -65,6 +67,7 @@ find "$LOG_DIR" -maxdepth 1 \( -name "server-*.log" -o -name "client-*.log" -o -
 
 folder_name=$(echo "$CKPT" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 model_root=$(echo "$CKPT" | awk -F'/checkpoints/' '{print $1}')
+[[ "$model_root" == "$CKPT" ]] && model_root=$(dirname "$(dirname "$CKPT")")
 VIDEO_OUT="${model_root}/results/${TASK_SUITE}/${folder_name}"
 mkdir -p "$VIDEO_OUT"
 

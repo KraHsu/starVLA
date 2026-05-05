@@ -5,7 +5,8 @@ set -e
 STARVLA_DIR=$(pwd)
 STARVLA_PYTHON=${STARVLA_DIR}/.venv/bin/python
 
-CKPT=${STARVLA_DIR}/playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
+DEFAULT_CKPT=${STARVLA_DIR}/playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
+CKPT=${CKPT:-$DEFAULT_CKPT}
 
 export PYTHONPATH=${STARVLA_DIR}:${PYTHONPATH}
 export HTTPS_PROXY=${HTTPS_PROXY:-http://127.0.0.1:7890}

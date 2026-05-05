@@ -165,6 +165,8 @@ trainer:
 ### 3.4 阶段 3 交付物
 - [x] 一次成功的 single-batch forward+backward 自检入口：`examples/PlanAndVerify/train_files/check_oft_vjepa_setup.py --run_single_batch`
 - [x] 一张架构图 `docs/figures/architecture.png`（**直接进毕设方法章节**）
+- [x] Stage 3 full H200 training accepted：`playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/`，final model `final_model/pytorch_model.pt`，中间 ckpt `checkpoints/steps_{5000,10000,15000,20000}_pytorch_model.pt`，TensorBoard `tensorboard/`，config `config.yaml` / `config.full.yaml`；最终 `action_dit_loss=0.0041139610`，`mse_score=0.0011409129`
+- [ ] Stage 3 final LIBERO sim eval：用 `CKPT=playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/final_model/pytorch_model.pt TASK_SUITE=libero_goal` 跑 smoke（1 trial/task）和正式 eval（10 或 30 trial/task）；结果应落 `playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/results/libero_goal/`
 
 ---
 

@@ -4,7 +4,8 @@ set -e
 
 STARVLA_DIR=$(pwd)
 
-CKPT=${STARVLA_DIR}/playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
+DEFAULT_CKPT=${STARVLA_DIR}/playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/checkpoints/steps_100000_pytorch_model.pt
+CKPT=${CKPT:-$DEFAULT_CKPT}
 
 export LIBERO_HOME=${STARVLA_DIR}/playground/LIBERO
 export LIBERO_Python=${STARVLA_DIR}/.venv-libero/bin/python
@@ -22,6 +23,7 @@ num_trials_per_task=${NUM_TRIALS:-30}
 
 folder_name=$(echo "$CKPT" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
 model_root=$(echo "$CKPT" | awk -F'/checkpoints/' '{print $1}')
+[[ "$model_root" == "$CKPT" ]] && model_root=$(dirname "$(dirname "$CKPT")")
 video_out_path="${model_root}/results/${task_suite_name}/${folder_name}"
 
 ${LIBERO_Python} ./examples/LIBERO/eval_files/eval_libero.py \
