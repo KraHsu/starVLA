@@ -72,6 +72,24 @@ LE_ROBOT3_TASKS_FILENAME = "meta/tasks.parquet"
 LE_ROBOT3_EPISODE_FILENAME = "meta/episodes/*/*.parquet"
 
 
+def _distributed_barrier() -> None:
+    if not dist.is_initialized():
+        return
+    if torch.cuda.is_available():
+        device_id = None
+        if "LOCAL_RANK" in os.environ:
+            device_id = int(os.environ["LOCAL_RANK"])
+        else:
+            try:
+                device_id = torch.cuda.current_device()
+            except Exception:
+                device_id = None
+        if device_id is not None:
+            dist.barrier(device_ids=[device_id])
+            return
+    dist.barrier()
+
+
 def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
     """Calculate the dataset statistics of all columns for a list of parquet files."""
     # Dataset statistics
@@ -879,7 +897,7 @@ class LeRobotSingleDataset(Dataset):
             le_statistics = None
 
         if dist.is_initialized():
-            dist.barrier()
+            _distributed_barrier()
 
         if le_statistics is None:
             le_statistics = _load_stats_cache(
@@ -1051,7 +1069,7 @@ class LeRobotSingleDataset(Dataset):
     
         # ---------- sync after rank0  ----------
         if dist.is_initialized():
-            dist.barrier()
+            _distributed_barrier()
     
         # ---------- read by all rank ----------
         with open(steps_path, "rb") as f:
