@@ -3,7 +3,8 @@ set -euo pipefail
 
 CONFIG_YAML="${1:-examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml}"
 CKPT_PATH="${2:-}"
-OUT_DIR="${3:-playground/cache/vjepa/vjepa2_1_vit_b_384/libero_goal}"
+DATASET_NAME="${DATASET_NAME:-libero_goal}"
+OUT_DIR="${3:-playground/cache/vjepa/vjepa2_1_vit_b_384/${DATASET_NAME}}"
 NUM_HISTORY_FRAMES="${4:-8}"
 BATCH_SIZE="${5:-8}"
 NUM_WORKERS="${6:-1}"
@@ -24,6 +25,7 @@ mkdir -p "${LOG_DIR}"
 
 echo "==> Starting V-JEPA cache extraction on 8 GPUs"
 echo "    config: ${CONFIG_YAML}"
+echo "    dataset:${DATASET_NAME}"
 echo "    ckpt:   ${CKPT_PATH}"
 echo "    out:    ${OUT_DIR}"
 echo "    N:      ${NUM_HISTORY_FRAMES}"
@@ -95,7 +97,7 @@ run_shard_until_done() {
     CUDA_VISIBLE_DEVICES="${shard_id}" \
       .venv/bin/python examples/PlanAndVerify/cache_files/extract_vjepa_cache.py \
         --config_yaml "${CONFIG_YAML}" \
-        --dataset_name libero_goal \
+        --dataset_name "${DATASET_NAME}" \
         --camera_key video.primary_image \
         --vjepa_ckpt "${CKPT_PATH}" \
         --output_dir "${OUT_DIR}" \

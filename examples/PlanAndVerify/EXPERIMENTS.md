@@ -129,6 +129,30 @@ bash examples/PlanAndVerify/eval_files/eval_libero_long_multi_gpu.sh
 
 ## 5. 训练方法
 
+### 5.0 先准备 `libero_10` 的 V-JEPA cache
+
+如果要跑 `QwenOFT_VJepa` on `libero_10`，先准备 cache。
+
+单卡：
+
+```bash
+DATASET_NAME=libero_10 \
+bash examples/PlanAndVerify/cache_files/run_extract_vjepa_cache.sh \
+  examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml \
+  $(pwd)/playground/Pretrained_models/vjepa2_vitg/vjepa2_1_vitg_384.pt \
+  playground/cache/vjepa/vjepa2_1_vit_b_384/libero_10
+```
+
+8 卡：
+
+```bash
+DATASET_NAME=libero_10 \
+bash examples/PlanAndVerify/cache_files/run_extract_vjepa_cache_8gpu.sh \
+  examples/PlanAndVerify/train_files/starvla_oft_libero_goal.yaml \
+  $(pwd)/playground/Pretrained_models/vjepa2_vitg/vjepa2_1_vitg_384.pt \
+  playground/cache/vjepa/vjepa2_1_vit_b_384/libero_10
+```
+
 ### 5.1 Baseline：`QwenOFT`
 
 #### `libero_goal 100%`
