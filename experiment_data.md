@@ -201,7 +201,7 @@ Per-task SR:
 | C. `QwenOFT_VJepa` full-data `libero_10` | 基本是 | 需要先准备 `libero_10` 的 V-JEPA cache |
 | A/C 多 seed | 是 | 现在可用 `SEED=` |
 | A/C 多 GPU 数 | 是 | 现在可用 `NUM_PROCESSES=` |
-| low-data 10% / 25% | 否（未自动化） | 当前仓库没有子集 materialization / split-aware loader |
+| low-data 10% / 25% | 是 | 训练时可直接设 `datasets.vla_data.data_fraction` 或 launcher `DATA_FRACTION` |
 | B. naive temporal baseline | 否 | 当前 repo 没有对应 framework/launcher |
 | DINOv2 / CLIP upstream replacement | 否 | 当前 repo 没有相应接入 |
 | projector + LoRA freeze ablation | 否 | 需要补 LoRA 训练路径 |
@@ -272,14 +272,25 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python examples/PlanAndVerify/cache_files/extra
 
 ### 5.2 `libero_goal` 25% / 10%
 
-当前仓库**没有**自动化的 subset pipeline。要跑这类实验，必须先二选一：
+当前仓库已经支持训练时直接按 episode 级别做 deterministic 子采样。
 
-1. 物化一个子集数据根目录，例如：
-   `playground/Datasets/LEROBOT_LIBERO_DATA_SUBSETS/libero_goal_25_seed2024/`
-   且目录内部仍保持 `libero_goal_no_noops_1.0.0_lerobot/` 这种 LeRobot 原始结构；
-2. 或新增 split-aware dataloader，让训练时按 split JSON 过滤 episode。
+规则：
 
-在这两条路没有做完之前，低数据实验只能算“计划中”，不能直接按命令跑。
+- 通过 `data_fraction ∈ (0, 1]` 指定保留多少比例的 trajectory；
+- 通过 `subset_seed` 固定子集；
+- 同一 `data_fraction + subset_seed` 会在 baseline / V-JEPA 之间产生完全一致的 episode 子集。
+- 对 `QwenOFT_VJepa`，只要该 suite 的**全量** V-JEPA cache 已存在，就不需要为 25% / 10% 另外抽 cache。
+
+示例：
+
+```bash
+SEED=42 \
+DATA_FRACTION=0.25 \
+SUBSET_SEED=42 \
+RUN_ID=stage1_oft_libero_goal25_seed42 \
+WANDB_MODE=disabled \
+bash examples/PlanAndVerify/train_files/run_oft_libero_goal.sh
+```
 
 ---
 
@@ -315,7 +326,7 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python examples/PlanAndVerify/cache_files/extra
 
 ## 7. 引用规则
 
-论文正文里当前可以安全引用的数值只有：
+论文正文里当前已经安全可引用的数值只有：
 
 - W1 `libero_10` 锚点：`0.9667`
 - Stage 1 baseline：`0.98`

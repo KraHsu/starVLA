@@ -10,6 +10,7 @@ from examples.PlanAndVerify.cache_files.extract_vjepa_cache import (
     patch_vjepa2_1_rope_dtype,
     save_episode_cache,
 )
+from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
 
 
 def test_save_episode_cache_and_build_index(tmp_path: Path):
@@ -70,3 +71,10 @@ def test_vjepa_rope_patch_preserves_input_dtype():
 def test_memory_fraction_from_gib_caps_at_one():
     assert memory_fraction_from_gib(100, 120 * 1024**3) == 100 / 120
     assert memory_fraction_from_gib(100, 80 * 1024**3) == 1.0
+
+
+def test_libero_single_suite_mixtures_are_registered():
+    assert "libero_goal" in DATASET_NAMED_MIXTURES
+    assert "libero_spatial" in DATASET_NAMED_MIXTURES
+    assert "libero_object" in DATASET_NAMED_MIXTURES
+    assert "libero_10" in DATASET_NAMED_MIXTURES

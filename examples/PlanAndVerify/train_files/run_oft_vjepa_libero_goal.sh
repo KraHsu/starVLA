@@ -1,5 +1,6 @@
 #!/bin/bash
 # Stage 3 — StarVLA-OFT + offline V-JEPA pooled features on LIBERO-Goal.
+# Supports deterministic low-data runs via DATA_FRACTION + SUBSET_SEED.
 
 set -e
 
@@ -27,6 +28,8 @@ WANDB_ENTITY=${WANDB_ENTITY:-${USER:-anonymous}}
 WANDB_MODE=${WANDB_MODE:-online}
 NUM_PROCESSES=${NUM_PROCESSES:-8}
 SEED=${SEED:-42}
+DATA_FRACTION=${DATA_FRACTION:-1.0}
+SUBSET_SEED=${SUBSET_SEED:-$SEED}
 
 if [[ -n "${DEBUG_STEPS:-}" ]]; then
     MAX_TRAIN_STEPS=${DEBUG_STEPS}
@@ -56,6 +59,9 @@ ${ACCEL_BIN} launch \
   starVLA/training/train_starvla.py \
     --config_yaml ${config_yaml} \
     --seed ${SEED} \
+    --datasets.vla_data.seed ${SEED} \
+    --datasets.vla_data.data_fraction ${DATA_FRACTION} \
+    --datasets.vla_data.subset_seed ${SUBSET_SEED} \
     --framework.name ${Framework_name} \
     --framework.qwenvl.base_vlm ${base_vlm} \
     --framework.vjepa.cache_dir ${vjepa_cache_dir} \

@@ -50,7 +50,7 @@
 | C @ `libero_10 100%` | 是 | 先准备 `libero_10` cache |
 | A/C 多 seed | 是 | 现在可用 `SEED=` |
 | A/C 多进程数 | 是 | 现在可用 `NUM_PROCESSES=` |
-| `libero_goal 25% / 10%` | 否（未自动化） | 需要先准备子集数据根目录或 split-aware loader |
+| `libero_goal 25% / 10%` | 是 | 训练时直接用 `DATA_FRACTION` + `SUBSET_SEED` |
 | B naive temporal | 否 | 无 framework / launcher |
 | DINOv2 / CLIP ablation | 否 | 无接入 |
 | projector + LoRA | 否 | 无训练路径 |
@@ -177,13 +177,12 @@ bash examples/PlanAndVerify/train_files/run_oft_libero_goal.sh
 
 #### `libero_goal 25%`
 
-前提：你已经准备好了一个只包含 25% episode 的数据根目录，并且内部仍保持 LeRobot 原始目录结构。
-
 ```bash
 SEED=42 \
 RUN_ID=stage1_oft_libero_goal25_seed42 \
-LIBERO_DATA_ROOT=/abs/path/to/LEROBOT_LIBERO_DATA_25 \
 DATA_MIX=libero_goal \
+DATA_FRACTION=0.25 \
+SUBSET_SEED=42 \
 WANDB_MODE=disabled \
 bash examples/PlanAndVerify/train_files/run_oft_libero_goal.sh
 ```
@@ -216,17 +215,15 @@ bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
 
 #### `libero_goal 25%`
 
-前提：
-
-- 25% 子集数据根目录已准备好
-- 对应 25% 数据也准备好了独立的 V-JEPA cache
+前提：`libero_goal` 的全量 V-JEPA cache 已存在。
 
 ```bash
 SEED=42 \
 RUN_ID=stage3_oft_vjepa_libero_goal25_seed42 \
-LIBERO_DATA_ROOT=/abs/path/to/LEROBOT_LIBERO_DATA_25 \
 DATA_MIX=libero_goal \
-VJEPA_CACHE_DIR=/abs/path/to/vjepa_cache_libero_goal_25 \
+DATA_FRACTION=0.25 \
+SUBSET_SEED=42 \
+VJEPA_CACHE_DIR=playground/cache/vjepa/vjepa2_1_vit_b_384/libero_goal \
 WANDB_MODE=disabled \
 bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
 ```
@@ -321,10 +318,10 @@ find "$RESULT_DIR" -name '*_failure.mp4' | sort
 1. 先把 `libero_10` 的 V-JEPA cache 准备好。
 2. 跑 `L100-A` 和 `L100-C` 的 seed 42。
 3. 如果 `libero_10` 已经出现 A/C 差距，再补 seed 17 和 1337。
-4. 之后再决定是否投入精力做 `libero_goal 25%` 的子集物化。
+4. 之后按同一个 `DATA_FRACTION + SUBSET_SEED` 组合补 `libero_goal 25%`。
 
 原因很简单：
 
 - `libero_goal 100%` 已经饱和；
 - `libero_10` 更可能给你带来可写的增益；
-- `25% data` 有价值，但前提是先把低数据子集数据准备流程补齐。
+- `25% data` 现在已经能直接在训练时指定，不需要额外物化训练子目录。

@@ -47,6 +47,14 @@ def make_LeRobotSingleDataset(
         embodiment_tag = ROBOT_TYPE_TO_EMBODIMENT_TAG[robot_type]
     
     video_backend = data_cfg.get("video_backend", "decord") if data_cfg else "torchvision_av"
+    dataset_cfg = data_cfg
+    if data_cfg is not None:
+        dataset_fraction_cfg = data_cfg.get("dataset_fractions", None)
+        if dataset_fraction_cfg is not None:
+            per_dataset_fraction = dataset_fraction_cfg.get(data_name, dataset_fraction_cfg.get(Path(data_name).name, None))
+            if per_dataset_fraction is not None:
+                dataset_cfg = OmegaConf.merge(data_cfg, {"data_fraction": float(per_dataset_fraction)})
+
     return LeRobotSingleDataset(
         dataset_path=dataset_path,
         modality_configs=modality_config,
@@ -54,7 +62,7 @@ def make_LeRobotSingleDataset(
         embodiment_tag=embodiment_tag,
         video_backend=video_backend, # decord is more efficiency | torchvision_av for video.av1
         delete_pause_frame=delete_pause_frame,
-        data_cfg=data_cfg,
+        data_cfg=dataset_cfg,
     )
 
 def get_vla_dataset(
@@ -71,6 +79,7 @@ def get_vla_dataset(
     data_root_dir = data_cfg.data_root_dir
     data_mix = data_cfg.data_mix
     delete_pause_frame = data_cfg.get("delete_pause_frame", False)
+    seed = int(data_cfg.get("seed", seed))
     mixture_spec = DATASET_NAMED_MIXTURES[data_mix]
     included_datasets, filtered_mixture_spec = set(), []
     for d_name, d_weight, robot_type in mixture_spec:  

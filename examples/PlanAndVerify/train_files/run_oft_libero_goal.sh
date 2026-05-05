@@ -6,6 +6,8 @@
 #   RUN_ID              default: stage1_oft_libero_goal_<utc-timestamp>
 #   MAX_TRAIN_STEPS     default: 20000
 #   PER_DEVICE_BATCH    default: 16     (effective batch = 16 * 8 = 128)
+#   DATA_FRACTION       default: 1.0    (episode-level subset fraction)
+#   SUBSET_SEED         default: SEED   (deterministic subset seed)
 #   WANDB_ENTITY        default: $WANDB_ENTITY (env)
 #   WANDB_MODE          default: online   ("disabled" to skip wandb)
 #   DEBUG_STEPS         unset = real run; set to e.g. 10 for smoke dry-run
@@ -47,6 +49,8 @@ WANDB_ENTITY=${WANDB_ENTITY:-${USER:-anonymous}}
 WANDB_MODE=${WANDB_MODE:-online}
 NUM_PROCESSES=${NUM_PROCESSES:-8}
 SEED=${SEED:-42}
+DATA_FRACTION=${DATA_FRACTION:-1.0}
+SUBSET_SEED=${SUBSET_SEED:-$SEED}
 ###############################################################################
 
 # Smoke-test override: caller sets DEBUG_STEPS=10 to do a 10-step dry run that
@@ -75,6 +79,9 @@ ${ACCEL_BIN} launch \
   starVLA/training/train_starvla.py \
     --config_yaml ${config_yaml} \
     --seed ${SEED} \
+    --datasets.vla_data.seed ${SEED} \
+    --datasets.vla_data.data_fraction ${DATA_FRACTION} \
+    --datasets.vla_data.subset_seed ${SUBSET_SEED} \
     --framework.name ${Framework_name} \
     --framework.qwenvl.base_vlm ${base_vlm} \
     --datasets.vla_data.data_root_dir ${libero_data_root} \

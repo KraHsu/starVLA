@@ -31,6 +31,8 @@ datasets:
     dataset_py: lerobot_datasets
     data_root_dir: playground/Datasets/LEROBOT_LIBERO_DATA
     data_mix: libero_goal           # 10 tasks, 主战场 per implementation_todo.md §1.2
+    data_fraction: 1.0              # set <1.0 for deterministic episode subset
+    subset_seed: 42                 # same value => same subset across methods
     action_type: delta_qpos
     sequential_step_sampling: False
     CoT_prompt: "Your task is {instruction}. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format."

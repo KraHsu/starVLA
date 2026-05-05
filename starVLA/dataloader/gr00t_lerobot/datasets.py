@@ -625,6 +625,7 @@ class LeRobotSingleDataset(Dataset):
         self.curr_traj_id = None
 
         self._trajectory_ids, self._trajectory_lengths = self._get_trajectories()
+        self._apply_data_fraction_filter()
         self._modality_keys = self._get_modality_keys()
         self._delta_indices = self._get_delta_indices()
         self._all_steps = self._get_all_steps()
@@ -658,6 +659,38 @@ class LeRobotSingleDataset(Dataset):
         The order of the lengths is the same as the order of the trajectory IDs.
         """
         return self._trajectory_lengths
+
+    def _apply_data_fraction_filter(self) -> None:
+        if self.data_cfg is None:
+            return
+
+        fraction = float(self.data_cfg.get("data_fraction", 1.0))
+        if not (0 < fraction <= 1):
+            raise ValueError(f"datasets.vla_data.data_fraction must be in (0, 1], got {fraction}")
+        if fraction >= 1:
+            return
+
+        subset_seed = int(self.data_cfg.get("subset_seed", self.data_cfg.get("seed", 42)))
+        original_count = len(self._trajectory_ids)
+        keep_count = max(1, int(np.ceil(original_count * fraction)))
+
+        rng = np.random.default_rng(subset_seed)
+        selected_indices = np.sort(rng.choice(original_count, size=keep_count, replace=False))
+        self._trajectory_ids = self._trajectory_ids[selected_indices]
+        self._trajectory_lengths = self._trajectory_lengths[selected_indices]
+
+        selected_ids = set(int(x) for x in self._trajectory_ids.tolist())
+        if hasattr(self, "trajectory_ids_to_metadata"):
+            self.trajectory_ids_to_metadata = {
+                trajectory_id: metadata
+                for trajectory_id, metadata in self.trajectory_ids_to_metadata.items()
+                if int(trajectory_id) in selected_ids
+            }
+
+        print(
+            f"Using data_fraction={fraction:.4f} subset for {self.dataset_name}: "
+            f"{keep_count}/{original_count} trajectories (subset_seed={subset_seed})"
+        )
 
     @property
     def all_steps(self) -> list[tuple[int, int]]:
@@ -981,7 +1014,12 @@ class LeRobotSingleDataset(Dataset):
             try:
                 with open(steps_path, "rb") as f:
                     cached_data = pickle.load(f)
-                return cached_data["steps"]
+                if cached_data.get("config_key") == config_key:
+                    return cached_data["steps"]
+                print(
+                    f"[RANK {os.environ.get('RANK', 'NA')}] "
+                    f"Cached steps config mismatch for {steps_path}; rebuilding."
+                )
             except Exception as e:
                 # include EOFError / PickleError / KeyError
                 print(
@@ -1026,6 +1064,8 @@ class LeRobotSingleDataset(Dataset):
         config_dict = {
             "delete_pause_frame": self.delete_pause_frame,
             "dataset_name": self.dataset_name,
+            "data_fraction": float(self.data_cfg.get("data_fraction", 1.0)) if self.data_cfg else 1.0,
+            "subset_seed": int(self.data_cfg.get("subset_seed", self.data_cfg.get("seed", 42))) if self.data_cfg else 42,
         }
         # Create a hash of the configuration
         config_str = str(sorted(config_dict.items()))
