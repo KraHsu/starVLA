@@ -1366,9 +1366,14 @@ class LeRobotSingleDataset(Dataset):
         trajectory_id, base_index = self.all_steps[index]
         raw_data = self.get_step_data(trajectory_id, base_index)
         data = self.transforms(raw_data)
-        return self._pack_sample(data)
+        return self._pack_sample(data, trajectory_id=trajectory_id, frame_id=base_index)
 
-    def _pack_sample(self, data: dict) -> dict:
+    def _pack_sample(
+        self,
+        data: dict,
+        trajectory_id: int | None = None,
+        frame_id: int | None = None,
+    ) -> dict:
         """Pack transformed modality data into training sample format."""
         step_images = []
         for video_key in self.modality_keys["video"]:
@@ -1388,6 +1393,11 @@ class LeRobotSingleDataset(Dataset):
             "lang": language,
             "robot_tag": self.tag
         }
+        if trajectory_id is not None:
+            sample["episode_id"] = int(trajectory_id)
+            sample["trajectory_id"] = int(trajectory_id)
+        if frame_id is not None:
+            sample["frame_id"] = int(frame_id)
 
         if self.data_cfg is not None and self.data_cfg.get("include_state", False) not in ["False", False]:
             state = []
@@ -1427,6 +1437,7 @@ class LeRobotSingleDataset(Dataset):
         data = {}
         # Get the data for all modalities # just for action base data
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
+        self.curr_traj_id = trajectory_id
         # TODO @JinhuiYE The logic below is poorly implemented. Data reading should be directly based on curr_traj_data.
         for modality in self.modality_keys:
             # Get the data corresponding to each key in the modality
@@ -1983,6 +1994,7 @@ class CachedLeRobotSingleDataset(LeRobotSingleDataset):
         """
         data = {}
         self.curr_traj_data = self.get_trajectory_data(trajectory_id)
+        self.curr_traj_id = trajectory_id
         # Get the data for all modalities
         for modality in self.modality_keys:
             # Get the data corresponding to each key in the modality
@@ -2353,7 +2365,7 @@ class LeRobotMixtureDataset(Dataset):
                     
                 raw_data = dataset.get_step_data(trajectory_id, step)    
                 data = dataset.transforms(raw_data)
-                sample = dataset._pack_sample(data)
+                sample = dataset._pack_sample(data, trajectory_id=trajectory_id, frame_id=step)
                 
                 return sample
                 
