@@ -35,6 +35,10 @@ RESUME_RUN_DIR=${RESUME_RUN_DIR:-}
 RESUME_RUN_ID=${RESUME_RUN_ID:-}
 RESUME_CKPT=${RESUME_CKPT:-}
 
+if [[ -n "${RESUME_RUN_DIR}" || -n "${RESUME_RUN_ID}" || -n "${RESUME_CKPT}" ]]; then
+    RESUME=1
+fi
+
 if [[ -n "${DEBUG_STEPS:-}" ]]; then
     MAX_TRAIN_STEPS=${DEBUG_STEPS}
     RUN_ID="${RUN_ID}_smoke${DEBUG_STEPS}"
@@ -74,7 +78,7 @@ if [[ -n "${vjepa_encoder_ckpt}" ]]; then
     EXTRA_ARGS+=(--framework.vjepa.encoder_ckpt_path "${vjepa_encoder_ckpt}")
 fi
 
-if [[ "${RESUME}" == "1" ]]; then
+if [[ "${RESUME}" == "1" || "${RESUME}" == "true" || "${RESUME}" == "True" || "${RESUME}" == "yes" ]]; then
     resume_source_run_dir=""
     resume_ckpt_path="${RESUME_CKPT}"
 
