@@ -1,0 +1,5 @@
+run_id,method,suite,data_fraction,seed,success_count,total_count,final_loss,final_mse,result_dir
+w1_starvla_pi_qwen3vl_libero_10_published,StarVLA-PI-Qwen3VL,libero_10,1.0,,290,300,,,playground/Pretrained_models/StarVLA/Qwen3-VL-PI-LIBERO-4in1/results/libero_10/Qwen3-VL-PI-LIBERO-4in1_checkpoints_steps_100000_pytorch_model.pt
+stage1_oft_libero_goal_20260504_185342,QwenOFT,libero_goal,1.0,42,98,100,0.004181030672043562,0.0011419133682336127,playground/Checkpoints/stage1_oft_libero_goal_20260504_185342/results/libero_goal/stage1_oft_libero_goal_20260504_185342_checkpoints_steps_20000_pytorch_model.pt
+stage3_oft_vjepa_libero_goal_20260505_042345,QwenOFT_VJepa,libero_goal,1.0,42,97,100,0.0041139610,0.0011409129,playground/Checkpoints/stage3_oft_vjepa_libero_goal_20260505_042345/results/libero_goal/stage3_oft_vjepa_libero_goal_20260505_042345_final_model_pytorch_model.pt
+stage1_oft_libero_goal25_seed42,QwenOFT,libero_goal,0.25,42,88,100,,,/mnt/cpfs/zch/pav_checkpoints/stage1_oft_libero_goal25_seed42/results/libero_goal/stage1_oft_libero_goal25_seed42_final_model_pytorch_model.pt
