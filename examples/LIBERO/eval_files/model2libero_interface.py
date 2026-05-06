@@ -50,7 +50,8 @@ class ModelClient:
 
         self.task_description = None
         self.image_history = deque(maxlen=self.horizon)
-        self.vjepa_image_history = deque(maxlen=8)
+        self.vjepa_num_history_frames = self.get_vjepa_num_history_frames(policy_ckpt_path)
+        self.vjepa_image_history = deque(maxlen=self.vjepa_num_history_frames)
         if self.action_ensemble:
             self.action_ensembler = AdaptiveEnsembler(self.action_ensemble_horizon, self.adaptive_ensemble_alpha)
         else:
@@ -163,6 +164,11 @@ class ModelClient:
         model_config, _ = read_mode_config(policy_ckpt_path)  # read config and norm_stats
         # import ipdb; ipdb.set_trace()
         return model_config["framework"]["action_model"]["future_action_window_size"] + 1
+
+    @staticmethod
+    def get_vjepa_num_history_frames(policy_ckpt_path):
+        model_config, _ = read_mode_config(policy_ckpt_path)
+        return int(model_config.get("framework", {}).get("vjepa", {}).get("num_history_frames", 8))
 
     def _resize_image(self, image: np.ndarray) -> np.ndarray:
         image = cv.resize(image, tuple(self.image_size), interpolation=cv.INTER_AREA)
