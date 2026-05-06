@@ -267,7 +267,7 @@ bash examples/PlanAndVerify/eval_files/eval_libero_long_multi_gpu.sh
 正式：
 
 ```bash
-CKPT=/home/zch/workspace/starVLA/playground/Checkpoints/stage3_oft_vjepa_libero_10_seed42/final_model/pytorch_model.pt \
+CKPT=/home/zch/workspace/starVLA/playground/Checkpoints/stage3_oft_vjepa_libero_10_seed42/checkpoints/steps_30000_pytorch_model.pt \
 TASK_SUITE=libero_10 \
 NUM_TRIALS=10 \
 GPU_LIST="0 1 2 3 4 5 6 7" \
@@ -294,6 +294,40 @@ find "$RESULT_DIR" -name '*_failure.mp4' | wc -l
 
 ```bash
 find "$RESULT_DIR" -name '*_failure.mp4' | sort
+```
+
+导出 trial-level CSV：
+
+```bash
+.venv/bin/python scripts/dump_baseline_table.py \
+    --eval_results "$RESULT_DIR" \
+    --out paper/tables/<experiment_id>.csv \
+    --label "<model_label>"
+```
+
+其中 `RESULT_DIR` 用评测脚本结束时打印的 `video_out_path=...`。CSV schema 固定为：
+`model, task_id, trial_id, success, mp4_path`。
+
+`QwenOFT_VJepa @ libero_10 @ seed42` 的具体例子：
+
+```bash
+RESULT_DIR=playground/Checkpoints/stage3_oft_vjepa_libero_10_seed42/results/libero_10/stage3_oft_vjepa_libero_10_seed42_checkpoints_steps_30000_pytorch_model.pt
+
+.venv/bin/python scripts/dump_baseline_table.py \
+    --eval_results "$RESULT_DIR" \
+    --out paper/tables/vjepa_oft_libero_10_seed42.csv \
+    --label StarVLA-OFT-VJEPA-Qwen3VL-libero10-seed42
+```
+
+如果是 baseline 对照，建议用对应命名：
+
+```bash
+RESULT_DIR=playground/Checkpoints/stage1_oft_libero_10_seed42/results/libero_10/stage1_oft_libero_10_seed42_checkpoints_steps_30000_pytorch_model.pt
+
+.venv/bin/python scripts/dump_baseline_table.py \
+    --eval_results "$RESULT_DIR" \
+    --out paper/tables/baseline_oft_libero_10_seed42.csv \
+    --label StarVLA-OFT-Qwen3VL-libero10-seed42
 ```
 
 ## 7. 每个实验必须记录什么

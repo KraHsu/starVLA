@@ -87,6 +87,7 @@ class QwenOFT_VJepa(Qwenvl_OFT):
         self.vjepa_dtype_name = str(vjepa_cfg.get("dtype", "bf16"))
         self.vjepa_primary_camera_index = int(vjepa_cfg.get("primary_camera_index", 0))
         self.vjepa_encoder_ckpt_path = self._resolve_vjepa_encoder_ckpt_path(vjepa_cfg)
+        self.vjepa_online_transform = None
         self.vjepa_projector = VJepaProjector(
             input_dim=int(vjepa_cfg.input_dim),
             output_dim=int(self.qwen_vl_interface.model.config.hidden_size),
@@ -95,6 +96,10 @@ class QwenOFT_VJepa(Qwenvl_OFT):
             num_attention_heads=int(vjepa_cfg.get("num_attention_heads", 8)),
             use_film_gating=bool(vjepa_cfg.get("use_film_gating", True)),
         )
+
+    def reset(self, **kwargs) -> None:
+        self.vjepa_frame_history.clear()
+        self._vjepa_last_task_id = None
 
     def _build_vlm(self):
         from starVLA.model.modules.vlm import get_vlm_model
@@ -162,6 +167,13 @@ class QwenOFT_VJepa(Qwenvl_OFT):
             tokens = encoder(batch)
         pooled = tokens.float().mean(dim=1)
         return pooled.to(device=device, dtype=dtype)
+
+    def _get_online_vjepa_transform(self):
+        if getattr(self, "vjepa_online_transform", None) is None:
+            from evals.video_classification_frozen.utils import make_transforms
+
+            self.vjepa_online_transform = make_transforms(training=False, crop_size=self.vjepa_img_size)
+        return self.vjepa_online_transform
 
     def _get_online_vjepa_encoder(self, device: torch.device):
         if self.vjepa_online_encoder is not None:
@@ -243,7 +255,7 @@ class QwenOFT_VJepa(Qwenvl_OFT):
         vjepa_modules.rotate_queries_or_keys = dtype_safe_rotate_queries_or_keys
 
     def _build_online_clip(self, example: dict) -> torch.Tensor:
-        image_obj = to_pil_preserve(example["image"])
+        image_obj = to_pil_preserve(example.get("vjepa_image", example["image"]))
         if isinstance(image_obj, (list, tuple)):
             if not image_obj:
                 raise ValueError("example['image'] is empty; cannot build online V-JEPA clip")
@@ -264,16 +276,20 @@ class QwenOFT_VJepa(Qwenvl_OFT):
             frames.insert(0, frames[0])
         frames = frames[-self.vjepa_num_history_frames :]
 
-        tensors = [self._preprocess_online_frame(frame) for frame in frames]
-        return torch.stack(tensors, dim=1)
+        clip = np.stack([np.asarray(frame, dtype=np.uint8) for frame in frames], axis=0)
+        transformed = self._preprocess_online_clip(clip)
+        if transformed.shape[1] != self.vjepa_num_history_frames:
+            raise RuntimeError(
+                f"Online V-JEPA clip has {transformed.shape[1]} frames, expected {self.vjepa_num_history_frames}"
+            )
+        return transformed
 
-    def _preprocess_online_frame(self, image: Image.Image) -> torch.Tensor:
-        image = image.resize((self.vjepa_img_size, self.vjepa_img_size), Image.BICUBIC)
-        arr = np.asarray(image, dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(arr).permute(2, 0, 1)
-        mean = torch.tensor(NORMALIZATION_MEAN, dtype=torch.float32).view(3, 1, 1)
-        std = torch.tensor(NORMALIZATION_STD, dtype=torch.float32).view(3, 1, 1)
-        return (tensor - mean) / std
+    def _preprocess_online_clip(self, clip: np.ndarray) -> torch.Tensor:
+        transform = self._get_online_vjepa_transform()
+        transformed = transform(clip)
+        if not isinstance(transformed, list) or len(transformed) != 1:
+            raise RuntimeError(f"Unexpected V-JEPA transform output type: {type(transformed)}")
+        return transformed[0]
 
     def forward(
         self,

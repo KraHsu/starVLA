@@ -74,6 +74,7 @@ class ModelClient:
         self.gripper_action_repeat = 0
         self.sticky_gripper_action = 0.0
         self.previous_gripper_action = None
+        self._reset_policy_history_next_step = True
 
     def step(self, example: dict, step: int = 0, **kwargs) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """
@@ -90,8 +91,10 @@ class ModelClient:
             if task_description != self.task_description:
                 self.reset(task_description)
 
+        vjepa_images = [np.asarray(image).copy() for image in images]
         images = [self._resize_image(image) for image in images]
         example["image"] = images
+        example["vjepa_image"] = vjepa_images
         if self._reset_policy_history_next_step:
             example["vjepa_reset_history"] = True
             self._reset_policy_history_next_step = False
