@@ -233,3 +233,22 @@ def test_vjepa_online_pooled_fallback_uses_encoder_output():
 
     assert pooled.shape == (1, 3)
     assert torch.isfinite(pooled).all()
+
+
+def test_vjepa_online_clip_prefers_explicit_history():
+    from starVLA.model.framework.VLM4A.QwenOFT_VJepa import QwenOFT_VJepa
+
+    model = object.__new__(QwenOFT_VJepa)
+    model.vjepa_primary_camera_index = 0
+    model.vjepa_num_history_frames = 4
+    model.vjepa_img_size = 16
+    model.vjepa_frame_history = deque(maxlen=4)
+    model._vjepa_last_task_id = None
+
+    frames = [
+        [Image.fromarray(np.full((12, 12, 3), value, dtype=np.uint8))] for value in (0, 64, 128, 255)
+    ]
+    clip = model._build_online_clip({"image": frames[-1], "lang": "task-c", "vjepa_image_history": frames})
+
+    assert clip.shape == (3, 4, 16, 16)
+    assert len(model.vjepa_frame_history) == 0

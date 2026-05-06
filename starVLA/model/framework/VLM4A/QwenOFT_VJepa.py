@@ -255,6 +255,10 @@ class QwenOFT_VJepa(Qwenvl_OFT):
         vjepa_modules.rotate_queries_or_keys = dtype_safe_rotate_queries_or_keys
 
     def _build_online_clip(self, example: dict) -> torch.Tensor:
+        explicit_history = example.get("vjepa_image_history")
+        if explicit_history:
+            return self._build_online_clip_from_explicit_history(example, explicit_history)
+
         image_obj = to_pil_preserve(example.get("vjepa_image", example["image"]))
         if isinstance(image_obj, (list, tuple)):
             if not image_obj:
@@ -272,6 +276,32 @@ class QwenOFT_VJepa(Qwenvl_OFT):
         frames = list(self.vjepa_frame_history)
         if not frames:
             raise ValueError("No frames available for online V-JEPA fallback")
+        while len(frames) < self.vjepa_num_history_frames:
+            frames.insert(0, frames[0])
+        frames = frames[-self.vjepa_num_history_frames :]
+
+        clip = np.stack([np.asarray(frame, dtype=np.uint8) for frame in frames], axis=0)
+        transformed = self._preprocess_online_clip(clip)
+        if transformed.shape[1] != self.vjepa_num_history_frames:
+            raise RuntimeError(
+                f"Online V-JEPA clip has {transformed.shape[1]} frames, expected {self.vjepa_num_history_frames}"
+            )
+        return transformed
+
+    def _build_online_clip_from_explicit_history(self, example: dict, history: list) -> torch.Tensor:
+        frames = []
+        for item in history:
+            image_obj = to_pil_preserve(item)
+            if isinstance(image_obj, (list, tuple)):
+                if not image_obj:
+                    continue
+                image_obj = image_obj[min(self.vjepa_primary_camera_index, len(image_obj) - 1)]
+            if not isinstance(image_obj, Image.Image):
+                raise TypeError(f"Expected a PIL image after conversion, got {type(image_obj)}")
+            frames.append(image_obj.convert("RGB"))
+
+        if not frames:
+            raise ValueError("No frames available in example['vjepa_image_history']")
         while len(frames) < self.vjepa_num_history_frames:
             frames.insert(0, frames[0])
         frames = frames[-self.vjepa_num_history_frames :]

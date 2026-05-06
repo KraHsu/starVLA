@@ -50,6 +50,7 @@ class ModelClient:
 
         self.task_description = None
         self.image_history = deque(maxlen=self.horizon)
+        self.vjepa_image_history = deque(maxlen=8)
         if self.action_ensemble:
             self.action_ensembler = AdaptiveEnsembler(self.action_ensemble_horizon, self.adaptive_ensemble_alpha)
         else:
@@ -66,6 +67,7 @@ class ModelClient:
     def reset(self, task_description: str) -> None:
         self.task_description = task_description
         self.image_history.clear()
+        self.vjepa_image_history.clear()
         if self.action_ensemble:
             self.action_ensembler.reset()
         self.num_image_history = 0
@@ -92,9 +94,11 @@ class ModelClient:
                 self.reset(task_description)
 
         vjepa_images = [np.asarray(image).copy() for image in images]
+        self.vjepa_image_history.append(vjepa_images)
         images = [self._resize_image(image) for image in images]
         example["image"] = images
         example["vjepa_image"] = vjepa_images
+        example["vjepa_image_history"] = list(self.vjepa_image_history)
         if self._reset_policy_history_next_step:
             example["vjepa_reset_history"] = True
             self._reset_policy_history_next_step = False
