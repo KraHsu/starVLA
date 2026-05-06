@@ -30,6 +30,10 @@ NUM_PROCESSES=${NUM_PROCESSES:-8}
 SEED=${SEED:-42}
 DATA_FRACTION=${DATA_FRACTION:-1.0}
 SUBSET_SEED=${SUBSET_SEED:-$SEED}
+RESUME=${RESUME:-0}
+RESUME_RUN_DIR=${RESUME_RUN_DIR:-}
+RESUME_RUN_ID=${RESUME_RUN_ID:-}
+RESUME_CKPT=${RESUME_CKPT:-}
 
 if [[ -n "${DEBUG_STEPS:-}" ]]; then
     MAX_TRAIN_STEPS=${DEBUG_STEPS}
@@ -48,9 +52,67 @@ cp "${config_yaml}" "${output_dir}/"
 ACCEL_BIN=${ACCEL_BIN:-.venv/bin/accelerate}
 EXTRA_ARGS=()
 
+resolve_resume_checkpoint() {
+    local checkpoint_dir=$1
+    local latest_ckpt
+    if [[ ! -d "${checkpoint_dir}" ]]; then
+        echo "[run_oft_vjepa_libero_goal.sh] checkpoint directory not found: ${checkpoint_dir}" >&2
+        exit 1
+    fi
+    latest_ckpt=$(find "${checkpoint_dir}" -maxdepth 1 -type f \
+        \( -name 'steps_*_pytorch_model.pt' -o -name 'steps_*_model.safetensors' \) \
+        | sort -V | tail -n 1)
+    if [[ -z "${latest_ckpt}" ]]; then
+        echo "[run_oft_vjepa_libero_goal.sh] no checkpoint found under ${checkpoint_dir}" >&2
+        exit 1
+    fi
+    printf '%s\n' "${latest_ckpt}"
+}
+
 if [[ -n "${vjepa_encoder_ckpt}" ]]; then
     echo "[run_oft_vjepa_libero_goal.sh] using online eval encoder ckpt: ${vjepa_encoder_ckpt}"
     EXTRA_ARGS+=(--framework.vjepa.encoder_ckpt_path "${vjepa_encoder_ckpt}")
+fi
+
+if [[ "${RESUME}" == "1" ]]; then
+    resume_source_run_dir=""
+    resume_ckpt_path="${RESUME_CKPT}"
+
+    if [[ -n "${RESUME_RUN_DIR}" ]]; then
+        resume_source_run_dir="${RESUME_RUN_DIR}"
+    elif [[ -n "${RESUME_RUN_ID}" ]]; then
+        resume_source_run_dir="${run_root_dir}/${RESUME_RUN_ID}"
+    fi
+
+    if [[ -z "${resume_ckpt_path}" && -n "${resume_source_run_dir}" ]]; then
+        resume_ckpt_path=$(resolve_resume_checkpoint "${resume_source_run_dir}/checkpoints")
+    fi
+
+    if [[ -z "${resume_ckpt_path}" ]]; then
+        resume_source_run_dir="${output_dir}"
+        resume_ckpt_path=$(resolve_resume_checkpoint "${output_dir}/checkpoints")
+    fi
+
+    if [[ ! -f "${resume_ckpt_path}" ]]; then
+        echo "[run_oft_vjepa_libero_goal.sh] resume checkpoint not found: ${resume_ckpt_path}" >&2
+        exit 1
+    fi
+
+    resume_ckpt_abs=$(realpath "${resume_ckpt_path}")
+    output_dir_abs=$(realpath "${output_dir}")
+    resume_dir_abs=$(dirname "${resume_ckpt_abs}")
+    expected_output_ckpt_dir="${output_dir_abs}/checkpoints"
+
+    if [[ "${resume_dir_abs}" != "${expected_output_ckpt_dir}" ]]; then
+        mkdir -p "${expected_output_ckpt_dir}"
+        cp -f "${resume_ckpt_abs}" "${expected_output_ckpt_dir}/"
+        resume_ckpt_abs="${expected_output_ckpt_dir}/$(basename "${resume_ckpt_abs}")"
+        echo "[run_oft_vjepa_libero_goal.sh] copied resume checkpoint into ${expected_output_ckpt_dir}"
+    fi
+
+    echo "[run_oft_vjepa_libero_goal.sh] resuming from ${resume_ckpt_abs}"
+    EXTRA_ARGS+=(--trainer.is_resume true)
+    EXTRA_ARGS+=(--trainer.pretrained_checkpoint "${resume_ckpt_abs}")
 fi
 
 ${ACCEL_BIN} launch \
