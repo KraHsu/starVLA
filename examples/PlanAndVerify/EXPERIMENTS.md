@@ -205,11 +205,13 @@ bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
 前提：`playground/cache/vjepa/vjepa2_1_vit_b_384/libero_10/` 已准备好。
 
 ```bash
+RESUME_RUN_ID='stage3_oft_vjepa_libero_goal_20260505_042345' \
 SEED=42 \
 RUN_ID=stage3_oft_vjepa_libero_10_seed42 \
 DATA_MIX=libero_10 \
 VJEPA_CACHE_DIR=playground/cache/vjepa/vjepa2_1_vit_b_384/libero_10 \
 WANDB_MODE=disabled \
+MAX_TRAIN_STEPS=30000 \
 bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
 ```
 
@@ -235,7 +237,7 @@ bash examples/PlanAndVerify/train_files/run_oft_vjepa_libero_goal.sh
 Smoke:
 
 ```bash
-CKPT=/abs/path/to/pytorch_model.pt \
+CKPT=/mnt/cpfs/zch/pav_checkpoints/stage1_oft_libero_goal25_seed42/final_model/pytorch_model.pt \
 NUM_TRIALS=1 \
 GPU_LIST="0" \
 bash examples/PlanAndVerify/eval_files/eval_libero_goal_sharded.sh
@@ -244,7 +246,7 @@ bash examples/PlanAndVerify/eval_files/eval_libero_goal_sharded.sh
 正式：
 
 ```bash
-CKPT=/abs/path/to/pytorch_model.pt \
+CKPT=/mnt/cpfs/zch/pav_checkpoints/stage1_oft_libero_goal25_seed42/final_model/pytorch_model.pt \
 NUM_TRIALS=10 \
 GPU_LIST="0 1 2 3 4 5 6 7" \
 bash examples/PlanAndVerify/eval_files/eval_libero_goal_sharded.sh
@@ -265,7 +267,7 @@ bash examples/PlanAndVerify/eval_files/eval_libero_long_multi_gpu.sh
 正式：
 
 ```bash
-CKPT=/abs/path/to/pytorch_model.pt \
+CKPT=/home/zch/workspace/starVLA/playground/Checkpoints/stage3_oft_vjepa_libero_10_seed42/final_model/pytorch_model.pt \
 TASK_SUITE=libero_10 \
 NUM_TRIALS=10 \
 GPU_LIST="0 1 2 3 4 5 6 7" \
